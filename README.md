@@ -2,6 +2,15 @@
 
 A shared plugin marketplace for [Claude Code](https://code.claude.com/) at Whitehead Institute. Plugins provide reusable skills, agents, hooks, and MCP server configurations that extend what Claude Code can do.
 
+## Available Plugins
+
+| Plugin | Skill | What it does |
+|--------|-------|--------------|
+| [`fry-python-tool`](plugins/fry-python-tool/) | `fry-python-tool` | Find existing GPU-powered computational biology tools on the Whitehead fry cluster, or scaffold a new one. For single-purpose Python tools that produce outputs (embeddings, segmentations, predictions) for downstream analysis. |
+| [`session-tools`](plugins/session-tools/) | `self-assess` | Audit the current Claude Code session for errors, inefficiencies, and repeated workarounds, then produce actionable recommendations to improve skills, scripts, CLAUDE.md, and tooling. |
+
+After installing (see below), invoke a skill with `/whitehead:<skill-name>` — e.g., `/whitehead:self-assess`.
+
 ## Using This Marketplace
 
 ### Add the marketplace
