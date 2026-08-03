@@ -12,7 +12,7 @@ description: >-
   about Slurm resource sizing. SKIP only when no cluster job is involved at any remove, or when
   the user has turned this system off (`"enabled": false` in its config).
 user-invocable: true
-allowed-tools: Read, Write, Edit, Bash(mkdir *), Bash(sacctmgr *), Bash(scontrol *), Bash(grep *)
+allowed-tools: Read, Write, Edit, Bash(test *), Bash(mkdir *), Bash(sacctmgr *), Bash(scontrol *), Bash(grep *)
 ---
 
 # Slurm Job Sizing
@@ -122,9 +122,10 @@ attaching to another cluster's job.
 Full file formats, the literal table header, and the rationale are in
 [reference/config.md](reference/config.md) → "Bootstrap". The branches, so none gets skipped:
 
-- **Config missing:** check first for a pre-plugin layout (`~/.claude/slurm-sizing.md`,
-  `~/.claude/slurm-jobs.tsv`, `~/.claude/slurm-digests/`); if any exist, offer to point the new
-  config at them instead of starting empty files beside real history. Then establish
+- **Config missing:** check first for a pre-plugin layout — probe with `test`, since one of the
+  three is a directory: `test -f ~/.claude/slurm-sizing.md`, `test -f ~/.claude/slurm-jobs.tsv`,
+  `test -d ~/.claude/slurm-digests`. If any exist, offer to point the new config at them instead of
+  starting empty files beside real history. Then establish
   `digest_cluster` — **do not ask for it in free text.** Run the §1 query, show the user the exact
   string it returned, and offer it as the answer, along with the option to name a different cluster
   and the option to decline ("not applicable / I have no weekly digest"). Declining writes

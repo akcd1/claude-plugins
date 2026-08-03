@@ -148,10 +148,18 @@ directories as needed when bootstrapping. The config file's own location is fixe
 
 **Config missing:**
 
-1. **Check for a pre-plugin layout first** — `~/.claude/slurm-sizing.md`, `~/.claude/slurm-jobs.tsv`,
-   `~/.claude/slurm-digests/`. Those are where an early hand-rolled version kept its data. If any
-   exist, offer to point the config at them instead of creating empty files beside them. Silently
-   starting fresh next to a populated table would strand real history.
+1. **Check for a pre-plugin layout first** — two files and one **directory**, where an early
+   hand-rolled version kept its data. Probe all three with `test`, which answers for a directory as
+   cleanly as for a file (a `Read` cannot: it fails on a missing path and on a directory alike):
+
+   ```bash
+   test -f ~/.claude/slurm-sizing.md   && echo "found: legacy table"
+   test -f ~/.claude/slurm-jobs.tsv    && echo "found: legacy log"
+   test -d ~/.claude/slurm-digests     && echo "found: legacy archive dir"
+   ```
+
+   If any exist, offer to point the config at them instead of creating empty files beside them.
+   Silently starting fresh next to a populated table would strand real history.
 2. **Determine `digest_cluster` by running the query, not by asking in free text.** Run the
    "Determining the local cluster" procedure above, show the user the exact string it returned, and
    offer it as the answer — e.g. "Slurm reports this cluster's name as `<name>`; is that the
@@ -199,7 +207,10 @@ Measured memory and CPU usage per job name, merged from weekly usage digests by
   `slurm-sizing` matches the job it is about to submit against this column.
 - **`peak_MB`** — the running maximum observed memory in **megabytes, at full precision**, across
   every digest ever merged. **This is the authoritative memory number**; everything else about
-  memory is derived from it. It only ever rises (see `peak_G`).
+  memory is derived from it. **It never falls through merging** — a week with a smaller input
+  leaves it untouched. The single exception is a human setting the `IO-BOUND` flag on in-process
+  evidence (below), which may lower it: that is a deliberate correction of an inflated `sacct`
+  figure, not a merge.
 - **`peak_G`** — `peak_MB / 1024`, rounded to 1 decimal, **for human reading only**. Never compute
   a recommendation from this column: it has already lost precision, and re-deriving `peak_MB` from
   it is not possible.
@@ -222,7 +233,7 @@ Measured memory and CPU usage per job name, merged from weekly usage digests by
 On every merge, for each job name:
 
 ```
-peak_MB = max(existing peak_MB, this week's max UsedMem_MB)      # full precision, MB, never lowered
+peak_MB = max(existing peak_MB, this week's max UsedMem_MB)      # full precision, MB; a merge never lowers it
 peak_G  = round(peak_MB / 1024, 1)                               # display only
 rec_mem = round_up_to(mem_round_gb,
                       max(mem_floor_gb, margin_multiplier * peak_MB / 1024))
@@ -238,9 +249,13 @@ next week (5000 MB) would keep `peak_G 14.6` but recompute `rec_mem` down to `12
 smaller number — a recommendation below the row's own recorded peak, and an OOM on the next real
 run. Recomputing from the stored `peak_MB` makes that arithmetically impossible.
 
-If a legacy table has no `peak_MB` column, add it and seed it as `peak_G * 1024` — a lossy but
-never-lower starting point — say so in the report, and treat every such row's `rec_mem` as a lower
-bound until the next digest refreshes it.
+If a legacy table has no `peak_MB` column, add it and seed it as **`(peak_G + 0.05) * 1024`**. The
+`+ 0.05` is not padding, it is the rounding correction: `peak_G` is rounded to **nearest**, so a
+bare `peak_G * 1024` can sit up to 51.2 MB *below* the true peak and migration would then lower a
+recommendation — e.g. a true peak of 16394 MB displays as `peak_G 16.0`, whose true `rec_mem` is
+36 G but whose bare-seeded `rec_mem` is 32 G, a 4 G drop in exactly the direction this column
+exists to prevent. Seeding at the top of the rounding interval cannot go low. Say so in the report,
+and treat every such row's `rec_mem` as a lower bound until the next digest refreshes it.
 
 **The `IO-BOUND` flag: how it is set, and what it does**
 

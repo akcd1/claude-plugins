@@ -63,9 +63,9 @@ for what each one means and the exact header to write if the table has to be cre
 
 2. **Parse.** Read the pasted table. Columns are, in order: `User`, `JobID`, `JobName`, `ReqMem`,
    `UsedMem`, `MemPct`, `ReqCPU`, `UsedCPU`, `CPUPct`, `Elapsed`. Memory columns are in
-   **megabytes** — written `ReqMem(M)` / `UsedMem(M)` elsewhere in this file to state the unit,
-   which is **not** part of the header text; do not require the literal `(M)` to be present, and do
-   not reject a digest over it. Skip the `OVERALL` line, skip `bash`, `python3`, and any bare shell
+   **megabytes**. Where a `(M)` suffix appears on those column names, it states the unit and is
+   **not** part of the header text: do not require the literal `(M)` to be present, and do not
+   reject a digest over it. Skip the `OVERALL` line, skip `bash`, `python3`, and any bare shell
    or interpreter name.
 
 3. **Filter to `digest_user` — a consent-gated filtering procedure, not part of parsing.**
@@ -210,8 +210,11 @@ for what each one means and the exact header to write if the table has to be cre
    display `peak_G = 4794` where `4.7` belongs). Add to `n`, set `last_seen` to the digest's
    week-ending date. **Never lower `peak_MB`** — it is a running maximum across all weeks ever
    merged, so a week in which the job ran a smaller input leaves it untouched.
-   If a row predates the `peak_MB` column, seed it as `peak_G * 1024` (lossy but never lower),
-   say so in the report, and treat its `rec_mem` as a lower bound until the next digest.
+   If a row predates the `peak_MB` column, seed it as **`(peak_G + 0.05) * 1024`** — `peak_G` is
+   rounded to *nearest*, so a bare `peak_G * 1024` can sit up to 51.2 MB below the true peak and
+   would lower the recommendation on migration (true peak 16394 MB shows as `peak_G 16.0`: true
+   `rec_mem` 36 G, bare-seeded `rec_mem` 32 G). Say so in the report, and treat its `rec_mem` as a
+   lower bound until the next digest.
    **Skip rows flagged `IO-BOUND`.** That flag lives in the `notes` column of the job's
    **existing row in the sizing table** (the configured `table` path) — never in the incoming
    digest, which carries no such marker. Check the current table row before merging, not the
@@ -307,7 +310,10 @@ for what each one means and the exact header to write if the table has to be cre
 
 - Advisory only. Do not edit job scripts, launcher scripts, or any pipeline code. Do not submit,
   cancel, or modify jobs.
-- Never lower `peak_MB`; never remove an `IO-BOUND` flag without in-process evidence
+- Never lower `peak_MB` **by merging** — it is a running maximum, and a smaller week leaves it
+  untouched. The one exception is a human setting the `IO-BOUND` flag on in-process evidence
+  (a deliberate correction of an inflated `sacct` figure, not a merge), which may lower it.
+  Never remove an `IO-BOUND` flag without in-process evidence
   (`getrusage`/`psutil`-style RSS sampling), because `sacct` MaxRSS cannot distinguish demand from
   page cache.
 - If the digest's column layout differs from Step 2's order, stop and report rather than guessing.
