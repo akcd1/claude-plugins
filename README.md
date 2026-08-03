@@ -8,16 +8,31 @@ A shared plugin marketplace for [Claude Code](https://code.claude.com/) at White
 |--------|-------|--------------|
 | [`fry-python-tool`](plugins/fry-python-tool/) | `fry-python-tool` | Find existing GPU-powered computational biology tools on the Whitehead fry cluster, or scaffold a new one. For single-purpose Python tools that produce outputs (embeddings, segmentations, predictions) for downstream analysis. |
 | [`session-tools`](plugins/session-tools/) | `self-assess` | Audit the current Claude Code session for errors, inefficiencies, and repeated workarounds, then produce actionable recommendations to improve skills, scripts, CLAUDE.md, and tooling. |
-| [`session-tools`](plugins/session-tools/) | `slurm-sizing` | Loads automatically before and after Slurm job submission. Sizes `--mem`/`--cpus-per-task` from a table of measured past usage instead of habit, and logs what each new job ran so a later `slurm-digest` merge can attach real scope to it. |
-| [`session-tools`](plugins/session-tools/) | `slurm-digest` | User-invoked. Merges a weekly Slurm usage digest into the measured sizing table `slurm-sizing` reads from. |
+| [`session-tools`](plugins/session-tools/) | `slurm-sizing` | Written to load on its own before and after Slurm job submission (via its skill description — Claude's discretion, not a hook). Sizes `--mem`/`--cpus-per-task` from a table of measured past usage instead of habit, and logs what each new job ran so a later `slurm-digest` merge can attach real scope to it. |
+| [`session-tools`](plugins/session-tools/) | `slurm-digest` | User-invoked as `/session-tools:slurm-digest`. Merges the weekly Slurm usage digest email into the measured sizing table `slurm-sizing` reads from. |
 
-After installing (see below), invoke a skill with `/whitehead:<skill-name>` — e.g., `/whitehead:self-assess`.
+After installing (see below), invoke a skill with `/<plugin-name>:<skill-name>` — the namespace is
+the **plugin** name, not the marketplace name. E.g. `/session-tools:self-assess` and
+`/session-tools:slurm-digest` are both in the `session-tools` plugin.
+
+**Where the weekly Slurm digest comes from.** `slurm-digest` does not generate a digest — it merges
+one you are already sent. Whitehead emails a Slurm usage digest **once a week** to users who ran
+jobs, listing each job's requested versus used memory and CPU. You paste that table into
+`/session-tools:slurm-digest`, along with the week-ending date it covers, and it folds the numbers
+into your sizing table.
 
 `slurm-sizing`'s data — the usage table and job log it reads and writes — lives under your own
-`~/.claude/slurm-sizing/`. It is **not shipped with the plugin** and starts empty; it becomes
-useful once you've merged your first digest with `slurm-digest`. A recommendation is only
-actionable when the workload scope behind the measurement is known: rows with an unknown scope
-are marked as lower bounds and can justify *raising* a request, but never *lowering* one.
+`~/.claude/slurm-sizing/`. It is **not shipped with the plugin** and starts empty, so **both skills
+are inert until you merge your first digest**: every job is "unknown", which `slurm-sizing` reports
+as a reason to measure rather than licence to guess. A recommendation is only actionable when the
+workload scope behind the measurement is known: rows with an unknown scope are marked as lower
+bounds and can justify *raising* a request, but never *lowering* one.
+
+**Note for existing `session-tools` users.** Version 1.1.0 adds `slurm-sizing`, which is designed
+to load **on its own** — before and after anything that submits a cluster job — rather than only
+when you invoke it. If you installed `session-tools` for `self-assess`, updating changes that
+behaviour. If it does not apply to you, say so the first time it asks: it writes
+`{"enabled": false}` to `~/.claude/slurm-sizing/config.json` and then stays silent permanently.
 
 ## Using This Marketplace
 
@@ -45,7 +60,9 @@ Install a plugin:
 /plugin install plugin-name@whitehead
 ```
 
-Installed plugins are available immediately. Plugin skills show up as `/whitehead:skill-name` commands.
+Installed plugins are available immediately. Plugin skills show up as `/<plugin-name>:<skill-name>`
+commands — the namespace is the plugin's name, not the marketplace's. For example, the
+`self-assess` skill in the `session-tools` plugin is `/session-tools:self-assess`.
 
 ### Update plugins
 
