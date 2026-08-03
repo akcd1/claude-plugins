@@ -8,8 +8,16 @@ A shared plugin marketplace for [Claude Code](https://code.claude.com/) at White
 |--------|-------|--------------|
 | [`fry-python-tool`](plugins/fry-python-tool/) | `fry-python-tool` | Find existing GPU-powered computational biology tools on the Whitehead fry cluster, or scaffold a new one. For single-purpose Python tools that produce outputs (embeddings, segmentations, predictions) for downstream analysis. |
 | [`session-tools`](plugins/session-tools/) | `self-assess` | Audit the current Claude Code session for errors, inefficiencies, and repeated workarounds, then produce actionable recommendations to improve skills, scripts, CLAUDE.md, and tooling. |
+| [`session-tools`](plugins/session-tools/) | `slurm-sizing` | Loads automatically before and after Slurm job submission. Sizes `--mem`/`--cpus-per-task` from a table of measured past usage instead of habit, and logs what each new job ran so a later `slurm-digest` merge can attach real scope to it. |
+| [`session-tools`](plugins/session-tools/) | `slurm-digest` | User-invoked. Merges a weekly Slurm usage digest into the measured sizing table `slurm-sizing` reads from. |
 
 After installing (see below), invoke a skill with `/whitehead:<skill-name>` — e.g., `/whitehead:self-assess`.
+
+`slurm-sizing`'s data — the usage table and job log it reads and writes — lives under your own
+`~/.claude/slurm-sizing/`. It is **not shipped with the plugin** and starts empty; it becomes
+useful once you've merged your first digest with `slurm-digest`. A recommendation is only
+actionable when the workload scope behind the measurement is known: rows with an unknown scope
+are marked as lower bounds and can justify *raising* a request, but never *lowering* one.
 
 ## Using This Marketplace
 
