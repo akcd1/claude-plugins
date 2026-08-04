@@ -38,7 +38,7 @@ verbatim, and in particular do not copy a cluster name from anyone else's config
 | `policy.margin_multiplier` | `2` | `rec_mem` = this × peak. |
 | `policy.mem_floor_gb` | `8` | Never recommend less than this. |
 | `policy.mem_round_gb` | `4` | Round `rec_mem` UP to a multiple of this. |
-| `policy.cpu_headroom` | `1.5` | `rec_cpu` = ceil(ReqCPU × CPUPct/100 × this), capped at `ReqCPU`. |
+| `policy.cpu_headroom` | `1.5` | `rec_cpu` = ceil(ReqCPU × CPUPct/100 × this), capped at `ReqCPU`. When a job name has several rows in one digest, `CPUPct` and `ReqCPU` are taken from that name's **maximum-`CPUPct`** row (below). |
 | `policy.cpu_floor` | `2` | Never recommend fewer CPUs than this. |
 
 **The `policy` values are tunable defaults, not invariants — but they are the reviewed defaults,
@@ -46,6 +46,14 @@ and changing them changes the safety properties.** In particular `mem_round_gb` 
 never to nearest — a safety margin that rounds down is not a margin. A site that lowers
 `margin_multiplier` is choosing more OOM risk in exchange for queue priority, and should say so to
 itself explicitly, in config, rather than by editing the skills.
+
+**Which row supplies `CPUPct` when a job name appears several times in one digest: the row with
+the MAXIMUM `CPUPct`, paired with that same row's `ReqCPU`.** Not the peak-memory row — the
+peak-memory run and the peak-CPU run are generally different runs, and pairing across them mixes
+two measurements. Under-provisioning CPU is the harmful direction (a serialised job, not merely a
+wasteful reservation), so this takes a running max exactly as the memory side does. A row with a
+**blank** `CPUPct` contributes no CPU evidence and is excluded from that maximum; blank is absence
+of evidence, not `0`.
 
 **The `ReqCPU` cap is not optional.** Full rule:
 `rec_cpu = min(ReqCPU, max(cpu_floor, ceil(ReqCPU × CPUPct/100 × cpu_headroom)))`.
@@ -168,9 +176,18 @@ directories as needed when bootstrapping. The config file's own location is fixe
      value `sacctmgr` would print on that cluster), warning that it is exact-matched.
    - If the user's digest covers a *different* cluster than the local one, take their name — but
      record it verbatim, and note that `slurm-sizing` will then be inert on this machine by design.
-3. **Offer the decline branch** in the same question ("not applicable / I have no weekly digest").
-   Declining writes `{"enabled": false}` and stops — see "Declining".
-4. Write the file with `enabled: true`, that `digest_cluster`, and the defaults above.
+3. **Confirm `digest_user` — show it, source it, let them correct it. Do not just write it.**
+   The default is the invoking `$USER`, but this key exists *because* a Slurm account name and a
+   login name can legitimately differ; a user for whom they differ gets a silently wrong value that
+   then filters out **all of their own rows** — the digest merges nothing and nothing says why.
+   So state the intended value, where it came from, and what it has to match — e.g. "I'll filter
+   the digest to `User = <$USER>` (taken from your `$USER` login name). This must match the `User`
+   column in the digest exactly. [use it / enter a different account name]". If the user is
+   already holding a digest, invite them to check the `User` column against it.
+4. **Offer the decline branch** in the same question as step 2 ("not applicable / I have no weekly
+   digest"). Declining writes `{"enabled": false}` and stops — see "Declining".
+5. Write the file with `enabled: true`, that `digest_cluster`, that `digest_user`, and the defaults
+   above.
 
 **Table missing:** create it with the header row and the "How to read a row" prose below, and zero
 data rows. An empty table is valid — it means every job is unknown, and an unknown job is a reason

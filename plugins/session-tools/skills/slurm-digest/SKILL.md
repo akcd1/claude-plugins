@@ -6,7 +6,7 @@ description: >-
   week-ending date it covers, then run it explicitly; this skill does not trigger on its own the
   way slurm-sizing does.
 user-invocable: true
-allowed-tools: Read, Write, Edit, Bash(mkdir *), Bash(grep *), Bash(awk *), Bash(sacct *), Bash(sacctmgr *), Bash(scontrol *)
+allowed-tools: Read, Write, Edit, Bash(test *), Bash(mkdir *), Bash(grep *), Bash(awk *), Bash(sacct *), Bash(sacctmgr *), Bash(scontrol *)
 ---
 
 # Slurm Digest Merge
@@ -30,7 +30,11 @@ local cluster" procedure, and the multi-user filtering rules referenced in Step 
 [../slurm-sizing/reference/config.md](../slurm-sizing/reference/config.md). Read `enabled`,
 `digest_cluster`, `digest_user`, `table`, `log`, `archive`, `multi_user_digest`, and `policy` from
 `~/.claude/slurm-sizing/config.json` before anything else below; if that config doesn't exist yet,
-follow its "Bootstrap" section first rather than guessing any of these values.
+follow its "Bootstrap" section first rather than guessing any of these values. That path runs here,
+in this skill, on first use — it probes for a pre-plugin layout with `test -f ~/.claude/slurm-sizing.md`,
+`test -f ~/.claude/slurm-jobs.tsv`, `test -d ~/.claude/slurm-digests` (the third is a directory,
+which `Read` cannot distinguish from a missing path), confirms `digest_cluster` and `digest_user`
+with the user, and creates the archive directory with `mkdir -p`.
 
 **If `enabled` is `false`**, the user has declined this system. Merge nothing. Report that it is
 turned off and offer to re-enable it (set `"enabled": true` and run bootstrap); proceed only if
@@ -65,8 +69,13 @@ for what each one means and the exact header to write if the table has to be cre
    `UsedMem`, `MemPct`, `ReqCPU`, `UsedCPU`, `CPUPct`, `Elapsed`. Memory columns are in
    **megabytes**. Where a `(M)` suffix appears on those column names, it states the unit and is
    **not** part of the header text: do not require the literal `(M)` to be present, and do not
-   reject a digest over it. Skip the `OVERALL` line, skip `bash`, `python3`, and any bare shell
-   or interpreter name.
+   reject a digest over it. Skip the `OVERALL` summary line. Also skip rows whose `JobName` is a
+   bare shell or interpreter rather than a real job — these carry no workload identity, so their
+   peaks cannot be attributed to anything. The list, which is **extensible**: `bash`, `sh`, `zsh`,
+   `csh`, `tcsh`, `ksh`, `dash`, `python`, `python2`, `python3`, `perl`, `ruby`, `Rscript`, `R`,
+   `julia`, `node`, `interactive`, `srun`, `salloc`, `wrap`. Treat any other bare
+   interpreter/shell binary name the same way, and say in the report which names were skipped so a
+   real job that happens to be named like one is visible rather than silently dropped.
 
 3. **Filter to `digest_user` — a consent-gated filtering procedure, not part of parsing.**
    Merge only rows whose `User` matches the configured `digest_user` (default: the invoking
@@ -254,7 +263,19 @@ for what each one means and the exact header to write if the table has to be cre
    - scope unknown (empty, or a `derived:` value not yet confirmed by a human) -> prefix `>=`; the
      row may justify raising a request, never lowering one
 
-9. **CPU.** One formula across the whole range — no bands, no carve-outs:
+9. **CPU.** **First pick the row, then apply the formula.** A job name usually has **several rows
+   in one digest** (nine runs of the same name is ordinary), and their `CPUPct` values differ
+   widely. **Use the row with the MAXIMUM `CPUPct` for that job name, and pair it with that same
+   row's `ReqCPU`.** Never take the CPU figures from the peak-*memory* row: the peak-memory run and
+   the peak-CPU run are generally different runs, and pairing them silently mixes two measurements.
+   Worked case: a name appearing 9 times with `CPUPct` from 1.55 to 49.08 gives `rec_cpu = 12` from
+   the 49.08 row (≈7.85 of 16 cores), but `rec_cpu = 2` if the 1.55 row is used because it happened
+   to hold the memory peak — a 6x spread, and the low answer would serialise a job that has
+   demonstrably used ~8 cores. **Under-provisioning CPU is the harmful direction** (slow or serial,
+   not merely wasteful), so take the max — the same running-max logic the memory side already uses,
+   rather than a representative sample.
+
+   Then, one formula across the whole range — no bands, no carve-outs:
    `rec_cpu = min(ReqCPU, max(policy.cpu_floor, ceil(ReqCPU x CPUPct / 100 x
    policy.cpu_headroom)))` — at the default values (`cpu_floor = 2`, `cpu_headroom = 1.5`),
    `rec_cpu = min(ReqCPU, max(2, ceil(ReqCPU x CPUPct/100 x 1.5)))`. **The `ReqCPU` cap is not
@@ -264,7 +285,14 @@ for what each one means and the exact header to write if the table has to be cre
    deliberate headroom over the observed average, not a serial/parallel classification — e.g.
    a job at 25% of 16 requested CPUs used ~4 cores on average, so `ceil(16 x 0.25 x 1.5) = 6`.
 
-   Record the observed `CPUPct` in `notes` **additively**: `notes` is one shared free-text column
+   **Blank `CPUPct`.** Real digests contain rows with an empty `CPUPct` field. A blank is **not
+   zero** — it is absence of evidence, and treating it as `0` would drive `rec_cpu` to `cpu_floor`
+   on no data at all. Such a row **contributes no CPU evidence**: exclude it when taking the
+   maximum above. If *every* row for a job name has a blank `CPUPct`, leave `rec_cpu` unchanged
+   (or empty on a new row), and say so in the report rather than emitting a floor value that looks
+   measured.
+
+   Record the observed maximum `CPUPct` in `notes` **additively**: `notes` is one shared free-text column
    that also holds the load-bearing `IO-BOUND` flag and any human annotation. Update or append the
    `CPUPct` fragment while **preserving every other fragment already in the cell** — never
    overwrite the column with a bare `CPUPct <n>`. Use a separated form such as

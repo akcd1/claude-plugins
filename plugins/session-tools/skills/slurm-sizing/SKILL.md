@@ -130,6 +130,10 @@ Full file formats, the literal table header, and the rationale are in
   string it returned, and offer it as the answer, along with the option to name a different cluster
   and the option to decline ("not applicable / I have no weekly digest"). Declining writes
   `{"enabled": false}`, creates nothing else, and this skill then stays silent permanently (§0).
+  Then **confirm `digest_user` rather than just writing it**: show the value you intend to use, say
+  it came from `$USER`, state that it must match the digest's `User` column exactly, and let the
+  user correct it — the two can legitimately differ, and a wrong value silently filters out every
+  one of their own rows.
 - **Table missing:** create it with the nine-column header row and the "How to read a row" prose
   given verbatim in [reference/config.md](reference/config.md) → "Table file format", and zero data
   rows. An empty table is a valid, complete state — every job is unknown, which is a reason to
