@@ -12,7 +12,7 @@ description: >-
   about Slurm resource sizing. SKIP only when no cluster job is involved at any remove, or when
   the user has turned this system off (`"enabled": false` in its config).
 user-invocable: true
-allowed-tools: Read, Write, Edit, Bash(test *), Bash(mkdir *), Bash(scontrol *), Bash(grep *)
+allowed-tools: Read, Write, Edit, Bash(test *), Bash(mkdir *), Bash(scontrol *), Bash(sacctmgr *), Bash(hostname *), Bash(grep *)
 ---
 
 # Slurm Job Sizing
@@ -40,30 +40,47 @@ data paths inside it are configurable).
 ## 1. Cluster gate — check this before anything else
 
 1. Read `digest_cluster` from the config. It holds a **composed identity**,
-   `<ClusterName>@<SlurmctldHost>` (e.g. `alpha@ctl-1`) — not a bare cluster name.
+   `<ClusterName>@<short hostname>` (e.g. `alpha@login-1`) — not a bare cluster name.
 2. Determine the **local cluster identity** using the shared procedure in
-   [reference/config.md](reference/config.md) → "Determining the local cluster identity":
+   [reference/config.md](reference/config.md) → "Determining the local cluster identity". In brief —
+   a **three-step chain**, so a missing `scontrol` degrades the identity instead of disabling the
+   skill:
 
    ```bash
-   scontrol show config | grep -E 'ClusterName|SlurmctldHost\[0\]'
+   scontrol show config | grep -E '^ClusterName'      # 1. the cluster name
+   sacctmgr -n -P list cluster format=Cluster         # 2. only if step 1 gave nothing
+   hostname -s                                        # the suffix: where the command was typed
    ```
 
-   Take the value after each `=`, trimmed, and compose `<ClusterName>@<SlurmctldHost>`. **Never use
-   `hostname`** — it names a node, not a cluster.
-   - **Either field is missing, or the command fails:** the local identity is undeterminable. Say
-     so explicitly and STOP — do not consult the table, do not append to the log. **Do not fall
-     back to the bare `ClusterName`** — that is the unsafe key this composition replaces.
-     "Unknown" is never treated as a match.
-3. Compare the two composed identities — an exact string match.
+   Take the value after the `=` (step 1) or the single field (step 2), trimmed, and compose
+   `<ClusterName>@<short hostname>`. The hostname is the **suffix, never the whole identity** —
+   except in the hostname-only fallback below, where no `ClusterName` could be read at all.
+   - **Neither `scontrol` nor `sacctmgr` yields a `ClusterName`:** use the **bare short hostname as
+     the whole identity**, and **say so explicitly in this run's report** — name the fallback and
+     say the identity is less specific than usual. The point of reporting it is that the user is
+     otherwise silently working under a different key than they expect. Do not stop for this: a
+     reported, degraded identity beats going inert.
+   - **The short hostname itself cannot be read:** the identity is undeterminable. Say so
+     explicitly and STOP — do not consult the table, do not append to the log. **Do not fall back
+     to the bare `ClusterName`** — that is the unsafe key this composition replaces. "Unknown" is
+     never treated as a match.
+3. Compare the two identities — an exact string match.
    - **They match:** proceed to §2.
    - **They differ:** say so explicitly (name both identities) and STOP. Do not consult the table
      and do not append to the log. This system is inert on any cluster other than the one the
      digest was built from — job IDs collide across clusters (see §5), so numbers from the wrong
-     cluster are worse than no numbers at all.
-   - **`digest_cluster` is a bare name with no `@`** (written before this rule existed): treat it
-     as **unverified** — it may name any cluster carrying that `ClusterName`. Say so and STOP,
-     asking the user to re-derive it through Bootstrap (§6). Do not silently upgrade it by
-     appending the local controller host: that asserts provenance nobody recorded.
+     cluster are worse than no numbers at all. **A second submit host on the same cluster lands
+     here** (see §5): the stand-down is the designed outcome, not a malfunction.
+   - **`digest_cluster` is a bare name with no `@`, and the local identity has one** (i.e. the
+     config predates this rule): treat it as **unverified** — it may name any cluster carrying that
+     `ClusterName`. Say so and STOP, asking the user to re-derive it through Bootstrap (§6). Do not
+     silently upgrade it by appending the local hostname: that asserts provenance nobody recorded.
+   - **Both sides are bare** (the local identity came from the hostname-only fallback above): an
+     exact match is a match — a hostname is host-specific, so this is the intended way a
+     fallback-bootstrapped site keeps working. Report that both sides are hostname-only. One
+     residual ambiguity is worth naming once: a legacy bare `ClusterName` that happens to equal
+     this host's short hostname would also match here, so if the config predates this rule,
+     re-derive it through Bootstrap (§6).
 
 ## 2. Before sizing any job — read the table first
 
@@ -200,7 +217,7 @@ cluster	jobid	submitted	job_name	scope	cwd
 
 - **Log file does not exist:** go to **Bootstrap** (§6), then append the row.
 - `cluster` must be the exact `digest_cluster` string from the config — the full composed
-  `<ClusterName>@<SlurmctldHost>` identity, never a bare cluster name. The digest merge filters log
+  `<ClusterName>@<short hostname>` identity, never a bare cluster name. The digest merge filters log
   rows by exact match on this column, so a variant spelling makes the row invisible, and a bare
   name makes it **unverifiable** (see §5).
 - `scope` is a short, concrete description of the workload this run did — e.g.
@@ -223,9 +240,22 @@ with separate controllers, separate accounting databases and independent job-ID 
 job number naming two unrelated jobs depending on which host you asked. Because `~/.claude` is
 often on shared/NFS storage, one log receives rows from both, tagged identically. That is the exact
 corruption this key exists to prevent, so the key must be
-**`<ClusterName>@<SlurmctldHost>` + jobid**. Two clusters with independent job-ID spaces
-necessarily have distinct controllers, so the suffix separates them; where `ClusterName` is already
-unique it changes nothing.
+**`<ClusterName>@<short hostname>` + jobid**.
+
+**What the suffix is, and what it costs — state this, don't hide it.** The suffix is the **short
+hostname of the machine the command was typed on**, not the cluster's controller. Those are
+different things: a controller name identifies the *cluster*, a hostname identifies *where you
+were standing*. The hostname is used because it is the name the people using this system actually
+say, and the name that already appears in their existing logs, while a controller name is invisible
+to them. The cost is real and follows directly: **a cluster with several submit hosts acquires
+several identities.**
+
+What happens then is benign, and this is the part to be clear about. The second host's identity
+simply will not equal the configured `digest_cluster`, so the gate **stands down with a message**
+(§1) rather than silently mis-keying rows into the log. The failure is visible and safe — a
+stand-down, not a corruption. A site with several login nodes should either set `digest_cluster`
+per host, or standardise on one submit host. Where `ClusterName` is already unique across the
+clusters one person can reach, the suffix changes nothing.
 
 **Legacy rows written with a bare name are unverified.** They may have come from any cluster with
 that name, so they must **not** be used to satisfy a scope match — treat them as no match and leave
@@ -247,8 +277,9 @@ user's own rows; neither failure announces itself.
   three is a directory: `test -f ~/.claude/slurm-sizing.md`, `test -f ~/.claude/slurm-jobs.tsv`,
   `test -d ~/.claude/slurm-digests`. If any exist, offer to point the new config at them instead of
   starting empty files beside real history. Then establish
-  `digest_cluster` — **do not ask for it in free text.** Run the §1 query, show the user the exact
-  string it returned, and offer it as the answer, along with the option to name a different cluster
+  `digest_cluster` — **do not ask for it in free text.** Run the §1 chain, compose the identity,
+  show the user the exact composed string **and the values it was built from**, and offer it as the
+  answer, along with the option to name a different cluster
   and the option to decline ("not applicable / I have no weekly digest"). Declining writes
   `{"enabled": false}`, creates nothing else, and this skill then stays silent permanently (§0).
   Then **confirm `digest_user` rather than just writing it**: show the value you intend to use, say

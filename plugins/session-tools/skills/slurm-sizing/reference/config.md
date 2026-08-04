@@ -6,7 +6,7 @@ read it. If it does not exist, the skills bootstrap it (below).
 ```json
 {
   "enabled": true,
-  "digest_cluster": "<ClusterName>@<SlurmctldHost>",
+  "digest_cluster": "<ClusterName>@<short hostname>",
   "digest_user":    "<your-slurm-account>",
   "table":   "~/.claude/slurm-sizing/table.md",
   "log":     "~/.claude/slurm-sizing/jobs.tsv",
@@ -23,15 +23,15 @@ read it. If it does not exist, the skills bootstrap it (below).
 ```
 
 Every `<...>` above is a placeholder — fill them in with your own. `digest_cluster` is the composed
-identity `<ClusterName>@<SlurmctldHost>`, both parts read from `scontrol show config` (below); do
-not copy a cluster identity from anyone else's config, and do not shorten it to the bare
-`ClusterName`. A wrong `digest_cluster` is the one setting that corrupts every recommendation
-silently.
+identity `<ClusterName>@<short hostname>`: the cluster name from `scontrol show config` (with a
+documented fallback chain, below) and the short hostname of the machine you submit from. Do not
+copy a cluster identity from anyone else's config, and do not shorten it to the bare `ClusterName`.
+A wrong `digest_cluster` is the one setting that corrupts every recommendation silently.
 
 | Key | Default | Meaning |
 |---|---|---|
 | `enabled` | `true` | Master switch. When `false`, both skills stay silent and do nothing (see "Declining"). |
-| `digest_cluster` | **none — must be set** | The cluster whose weekly usage digest feeds this system, as the composed identity `<ClusterName>@<SlurmctldHost>` (e.g. `alpha@ctl-1`). Compared against the local identity before anything is consulted or logged. A bare `ClusterName` is **not** sufficient — see "Why the controller host is part of the identity". |
+| `digest_cluster` | **none — must be set** | The cluster whose weekly usage digest feeds this system, as the composed identity `<ClusterName>@<short hostname>` (e.g. `alpha@login-1`). Compared against the local identity before anything is consulted or logged. A bare `ClusterName` is **not** sufficient — see "Why the identity carries a host suffix". |
 | `digest_user` | the invoking `$USER` | Which user's rows to merge. The digest carries a `User` column and may contain several people's jobs. |
 | `table` | `~/.claude/slurm-sizing/table.md` | The sizing table. |
 | `log` | `~/.claude/slurm-sizing/jobs.tsv` | The submission log where scope is recorded. |
@@ -100,27 +100,48 @@ input and there is nothing to configure; see "Declining" below.
 need the **local cluster identity**. They all use exactly this procedure — do not substitute
 another:
 
-1. Read both fields from one call:
+1. **Get the `ClusterName`** — a three-step chain, taken in order, so that an unreadable
+   `scontrol` degrades the identity instead of disabling the skill:
 
    ```bash
-   scontrol show config | grep -E 'ClusterName|SlurmctldHost\[0\]'
+   scontrol show config | grep -E '^ClusterName'      # 1. preferred
+   sacctmgr -n -P list cluster format=Cluster         # 2. only if step 1 gave nothing
    ```
 
-2. Take the value to the right of each `=`, trimmed of whitespace: `ClusterName`, and the
-   controller host from `SlurmctldHost[0]`.
-3. **Compose the identity as `<ClusterName>@<SlurmctldHost>`** — e.g. `alpha@ctl-1`,
-   `alpha@ctl-2`. This composed string *is* the cluster identity everywhere in this system: it is
+   - **Step 1** — take the value to the right of the `=`, trimmed of whitespace.
+   - **Step 2** — if `scontrol` is unavailable, errors, or prints no `ClusterName`, ask the
+     accounting layer instead. Take the single field, trimmed. If it returns several lines, this
+     host is configured against more than one cluster and the name is ambiguous: treat that as
+     step 2 having failed.
+   - **Step 3 — neither yields a name:** use the **bare short hostname as the whole identity**, and
+     **say so explicitly in the run's report**. This is the documented degraded mode, and it must
+     be announced every time it is used: the user is otherwise silently keyed on something less
+     specific than usual, with no way to tell from the output. It is still better than going inert,
+     which is what an underivable identity used to cause.
+
+2. **Get the short hostname** — the machine the command was typed on, with any domain suffix
+   stripped:
+
+   ```bash
+   hostname -s
+   ```
+
+   If `-s` is unsupported, take the first dot-separated field of `hostname`. If the hostname cannot
+   be read at all, the local identity is **unknown**: say so and stop. Do **not** fall back to the
+   bare `ClusterName` and treat it as the identity — that is precisely the unsafe key this
+   composition exists to replace. "Unknown" is never treated as a match.
+
+3. **Compose the identity as `<ClusterName>@<short hostname>`** — e.g. `alpha@login-1`,
+   `alpha@login-2`. This composed string *is* the cluster identity everywhere in this system: it is
    what `digest_cluster` holds, what goes in the log's `cluster` column, and what the local-vs-digest
-   gate compares.
-4. If either field is missing, the local identity is **unknown**. Say so and stop. Do **not** fall
-   back to the bare `ClusterName` and treat it as the identity — that is precisely the unsafe key
-   this composition exists to replace. "Unknown" is never treated as a match.
+   gate compares. Under the step-3 fallback it is the bare hostname alone.
 
-**Never use `hostname` for this.** It returns a node's name, not a cluster's identity; the two are
-different strings on essentially every site, so comparing a hostname against `digest_cluster` fails
-silently and permanently disables whatever it was guarding.
+**The hostname is the suffix, never the whole identity** — outside the step-3 fallback above. A
+hostname on its own does not name a cluster; substituting one for the composed identity would fail
+the comparison against `digest_cluster` on essentially every site and silently disable whatever it
+was guarding.
 
-### Why the controller host is part of the identity
+### Why the identity carries a host suffix
 
 **A Slurm `ClusterName` is not guaranteed to be unique across the clusters one person can reach.**
 It is a locally chosen label, and nothing stops two independent clusters from carrying the same one.
@@ -135,9 +156,25 @@ identically. A scope recorded on one cluster then attaches to an unrelated job w
 on the other, which is exactly the corruption the `(cluster, jobid)` key was introduced to prevent.
 A bare cluster name does not prevent it.
 
-Adding the controller host fixes it because two clusters with distinct job-ID spaces necessarily
-have distinct controllers. **At a site where `ClusterName` is already unique, this changes nothing**
-— the suffix just makes the identity explicit rather than implied.
+Adding a host suffix separates them, because the two clusters are reached from different submit
+hosts. **At a site where `ClusterName` is already unique, this changes nothing** — the suffix just
+makes the identity explicit rather than implied.
+
+**Why the short hostname and not the controller — and what that costs.** The controller
+(`SlurmctldHost`) identifies the *cluster*; the short hostname identifies *where the command was
+typed*. The hostname is used because it is the name the people using this system actually say, and
+the name that already appears in their existing logs, whereas a controller name is invisible to
+them. That choice has a real cost, stated here rather than buried: **a cluster with several submit
+hosts acquires several identities** — `alpha@login-1` and `alpha@login-2` are two identities for
+one cluster.
+
+**What happens then is benign, and visible.** The second host's identity will not equal the
+configured `digest_cluster`, so the gate **stands down with a message** (`slurm-sizing` §1) instead
+of silently mis-keying rows. Nothing is written under the wrong key; the run just declines to use
+the table and says why. A site with several login nodes should either set `digest_cluster` per host,
+or standardise on a single submit host for the jobs it wants sized. Note that a shared `~/.claude`
+holds a single config, so "per host" is only available where the home directory is not shared —
+otherwise, standardising on one submit host is the workable answer.
 
 ### Legacy log rows written before this change
 
@@ -156,14 +193,14 @@ them:
 
 ## `digest_cluster` must be the exact composed identity
 
-`digest_cluster` holds a **`<ClusterName>@<SlurmctldHost>`** string and is **exact-matched** —
+`digest_cluster` holds a **`<ClusterName>@<short hostname>`** string and is **exact-matched** —
 against the local identity from the procedure above, and against the `cluster` column of every log
-row. A colloquial or approximate answer ("the cluster", "our HPC", a hostname, a capitalised
-variant, or a bare `ClusterName`) is not a failure that announces itself: it makes `slurm-sizing`'s
-gate never match, so the skill goes inert forever, or it makes the digest lookup never match, so
-every recommendation carries `>=` forever.
+row. A colloquial or approximate answer ("the cluster", "our HPC", a bare hostname where a
+`ClusterName` was available, a capitalised variant, or a bare `ClusterName`) is not a failure that
+announces itself: it makes `slurm-sizing`'s gate never match, so the skill goes inert forever, or it
+makes the digest lookup never match, so every recommendation carries `>=` forever.
 
-Therefore **bootstrap does not ask for it in free text.** It runs the query above, composes the
+Therefore **bootstrap does not ask for it in free text.** It runs the chain above, composes the
 string, shows it to the user, and offers it as the answer (see Bootstrap). And the `cluster` column
 written into every log row must carry that same exact composed string — it is what the digest merge
 filters log rows on.
@@ -171,7 +208,10 @@ filters log rows on.
 **`digest_cluster` deliberately has no default.** Guessing it is the one error that silently
 corrupts results: sizing advice from the wrong cluster's data is worse than no advice, because job
 IDs are not unique across clusters — and, as the finding above shows, cluster *names* are not
-either. Never infer it from the local hostname.
+either. The local hostname supplies the identity's **suffix** and nothing more: it is never, on its
+own, an inference about which cluster the user's digest covers. (The one exception is the step-3
+fallback above, where no `ClusterName` could be read at all — and that is disclosed to the user at
+bootstrap and reported on every run that uses it, not inferred silently.)
 
 ## `digest_user` and multi-user digests
 
@@ -240,17 +280,25 @@ the user's own rows. Neither failure announces itself.
 
    If any exist, offer to point the config at them instead of creating empty files beside them.
    Silently starting fresh next to a populated table would strand real history.
-2. **Derive `digest_cluster` by running the query and composing the identity — never ask for it in
+2. **Derive `digest_cluster` by running the chain and composing the identity — never ask for it in
    free text.** Run the "Determining the local cluster identity" procedure above, **compose
-   `<ClusterName>@<SlurmctldHost>`**, display that exact composed string, and offer it as the
-   answer — e.g. "This host reports `ClusterName = alpha` and `SlurmctldHost[0] = ctl-1`, so its
-   cluster identity is `alpha@ctl-1`; is that the cluster your weekly digest covers? [use it /
-   enter a different identity / not applicable]". Show both source fields, not just the result, so
+   `<ClusterName>@<short hostname>`**, display that exact composed string, and offer it as the
+   answer — e.g. "This host reports `ClusterName = alpha` and `hostname -s = login-1`, so its
+   cluster identity is `alpha@login-1`; is that the cluster your weekly digest covers? [use it /
+   enter a different identity / not applicable]". Show both source values, not just the result, so
    the user can tell which machine they are on — the whole point of the suffix is that two hosts
    can report the same `ClusterName`.
-   - If either field is missing, say so and ask the user for the exact composed identity of the
-     cluster their digest covers, warning that it is exact-matched. Do not accept or record a bare
-     `ClusterName` as the identity.
+   - **Say which step of the chain supplied the `ClusterName`** when it was not step 1, and say
+     plainly if the identity is a **hostname-only fallback** (step 3): "neither `scontrol` nor
+     `sacctmgr` reported a `ClusterName` here, so the identity is just this host's name, `login-1`
+     — less specific than usual". The user is deciding what to record; they need to know the value
+     is degraded before they approve it.
+   - Mention the multi-submit-host consequence when offering the value: if they submit from more
+     than one login node, this identity covers **this one**, and `slurm-sizing` will stand down on
+     the others (see "Why the identity carries a host suffix").
+   - If the hostname cannot be read at all, say so and ask the user for the exact composed identity
+     of the cluster their digest covers, warning that it is exact-matched. Do not accept or record
+     a bare `ClusterName` as the identity.
    - If the user's digest covers a *different* cluster than the local one, take their answer — but
      record it verbatim, and note that `slurm-sizing` will then be inert on this machine by design.
 3. **Confirm `digest_user` — show it, source it, let them correct it. Do not just write it.**

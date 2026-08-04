@@ -6,7 +6,7 @@ description: >-
   week-ending date it covers, then run it explicitly; this skill does not trigger on its own the
   way slurm-sizing does.
 user-invocable: true
-allowed-tools: Read, Write, Edit, Bash(test *), Bash(mkdir *), Bash(grep *), Bash(awk *), Bash(sacct *), Bash(scontrol *)
+allowed-tools: Read, Write, Edit, Bash(test *), Bash(mkdir *), Bash(grep *), Bash(awk *), Bash(sacct *), Bash(sacctmgr *), Bash(scontrol *), Bash(hostname *)
 ---
 
 # Slurm Digest Merge
@@ -132,8 +132,8 @@ throughout is whether continuing requires *assuming* something unverified.
    configured `log` path (default `~/.claude/slurm-sizing/jobs.tsv`) is tab-separated and begins
    with `#`-prefixed comment lines before its header row
    `cluster	jobid	submitted	job_name	scope	cwd`.
-   **The `cluster` column holds a composed identity, `<ClusterName>@<SlurmctldHost>`** (e.g.
-   `alpha@ctl-1`), and so does `digest_cluster`. Digests come from the configured `digest_cluster`
+   **The `cluster` column holds a composed identity, `<ClusterName>@<short hostname>`** (e.g.
+   `alpha@login-1`), and so does `digest_cluster`. Digests come from the configured `digest_cluster`
    only; the log's rows carry their own identity, which may name a different cluster for jobs
    submitted elsewhere — `~/.claude` is often shared/NFS storage, so one log routinely receives
    rows from every cluster its owner touches. Separate clusters are separate Slurm ID namespaces —
@@ -145,9 +145,19 @@ throughout is whether continuing requires *assuming* something unverified.
    **And matching on a bare `ClusterName` is not sufficient either.** A `ClusterName` is a locally
    chosen label with no uniqueness guarantee: **two clusters reachable from one shared home were
    found reporting the same `ClusterName` while having separate controllers, separate accounting
-   databases and independent job-ID spaces.** That is why the identity carries the controller host —
-   two clusters with independent job-ID spaces necessarily have distinct controllers. Compare the
-   whole composed string, never just the part before the `@`.
+   databases and independent job-ID spaces.** That is why the identity carries a host suffix — the
+   two clusters are reached from different submit hosts. Compare the whole composed string, never
+   just the part before the `@`.
+
+   **The suffix is the short hostname of the submitting machine, not the controller, and that has a
+   cost worth knowing here.** A hostname says where the command was typed, not which cluster it
+   reached, so **one cluster with several submit hosts produces several identities** —
+   `alpha@login-1` and `alpha@login-2`. Log rows written from a second login node therefore will
+   **not** match `digest_cluster` and will not contribute scope. That is a visible shortfall, not a
+   corruption: the rows are skipped, nothing is mis-keyed, and Step 12 reports the count. If a
+   populated log shows many non-matching rows whose identities differ only after the `@`, say so —
+   the user is submitting from more than one host and should standardise, or point `digest_cluster`
+   at the host they actually use.
 
    **Do this with a real shell command, not by reasoning over `Read` output**, so the composite key
    and the tab delimiter are actually enforced. One `awk` lookup does all of it — comment
@@ -180,6 +190,13 @@ throughout is whether continuing requires *assuming* something unverified.
    skipped as unverified-legacy, so a drop in matches is visibly the transition rather than a
    malfunction. New rows carry the composed identity, so this fades on its own.
 
+   **The one case where that exclusion is not automatic:** a `digest_cluster` produced by the
+   hostname-only fallback (Step 6's chain, step 3) has no `@`, so `$1 == c` no longer rules out bare
+   rows by construction — it will match a legacy row whose bare `ClusterName` happens to equal that
+   hostname. The rule does not change (bare names stay unverified and are never rewritten); say so
+   in the report when the identity is hostname-only, so a match on a bare key is visible rather than
+   assumed clean.
+
    A digest row with no output line gets `scope: unknown`. **If zero rows match, say so
    prominently** — a silently failing lookup makes every recommendation a lower bound and the
    system quietly stops working. Because `slurm-sizing` refuses to log on any cluster other than
@@ -207,22 +224,29 @@ throughout is whether continuing requires *assuming* something unverified.
      `sacct` run against this one's accounting database (`sacct -L -j <jobid>` returns nothing for
      it there). Determine the **local cluster identity** with the **shared procedure** in
      [../slurm-sizing/reference/config.md](../slurm-sizing/reference/config.md) → "Determining the
-     local cluster identity":
+     local cluster identity" — a **three-step chain** for the cluster name, then the host suffix:
 
      ```bash
-     scontrol show config | grep -E 'ClusterName|SlurmctldHost\[0\]'
+     scontrol show config | grep -E '^ClusterName'      # 1. preferred
+     sacctmgr -n -P list cluster format=Cluster         # 2. only if step 1 gave nothing
+     hostname -s                                        # the suffix
      ```
 
-     Take the value after each `=`, trimmed, and compose `<ClusterName>@<SlurmctldHost>` — **never
-     `hostname`**, which returns a node name, not a cluster identity, and would therefore fail this
-     comparison on essentially every site while reporting the result as a deliberate skip. Compare
-     the **whole composed string** to `digest_cluster` from config; **comparing only the
-     `ClusterName` part is not sufficient** — two clusters reachable from one shared home were
-     found reporting the same `ClusterName` with independent job-ID spaces, so a name-only match
-     would query the wrong accounting database and silently attach another cluster's submit line as
-     this job's scope. If they differ, **skip enrichment entirely** for the whole digest — do not
-     query `sacct` — and say so plainly in the report (Step 12). If either field is missing, the
-     local identity is undeterminable: skip and say so, and do **not** fall back to the bare
+     Take the value after the `=` (step 1) or the single field (step 2), trimmed, and compose
+     `<ClusterName>@<short hostname>`. **If neither step 1 nor step 2 yields a `ClusterName`**, use
+     the bare short hostname as the whole identity and **say so in the report (Step 12)** — the
+     identity is less specific than usual, and the user must be told rather than left to assume the
+     normal composed form. **A hostname is the suffix, never the whole identity outside that
+     fallback**: substituting one would fail this comparison on essentially every site while
+     reporting the result as a deliberate skip. Compare the **whole composed string** to
+     `digest_cluster` from config; **comparing only the `ClusterName` part is not sufficient** —
+     two clusters reachable from one shared home were found reporting the same `ClusterName` with
+     independent job-ID spaces, so a name-only match would query the wrong accounting database and
+     silently attach another cluster's submit line as this job's scope. If they differ, **skip
+     enrichment entirely** for the whole digest — do not query `sacct` — and say so plainly in the
+     report (Step 12); **a digest merged from a second submit host of the same cluster lands here**,
+     and skipping is the correct, visible outcome. If the hostname cannot be read, the local
+     identity is undeterminable: skip and say so, and do **not** fall back to the bare
      `ClusterName`. Never fabricate a scope to compensate.
    - **Batch query, one field per call — never a combined multi-field query.** Query once for
      every unmatched row, not per row, but query `SubmitLine` and `WorkDir` in **separate** calls:
@@ -494,6 +518,14 @@ throughout is whether continuing requires *assuming* something unverified.
     enrichment was skipped entirely because the digest's cluster differs from the local cluster,
     or because the local cluster was undeterminable (the Step 6 cluster guard) — if skipped, say
     so explicitly rather than silently omitting the counts.
+
+    **Also state how the local cluster identity was derived, whenever it was not the ordinary way.**
+    Name it if the `ClusterName` came from `sacctmgr` rather than `scontrol`, and say plainly if the
+    identity is a **hostname-only fallback** (neither command reported a `ClusterName`) — in that
+    case the key is less specific than usual, and a reader who is not told will assume the normal
+    `<ClusterName>@<short hostname>` form. Also report log rows skipped because their identity
+    matched only before the `@`: those were submitted from a different host, which usually means
+    more than one login node is in use (Step 5).
     Also state: how many rows were filtered out because their `User` did not match
     `digest_user` (Step 3), whenever that filtering applied.
 
