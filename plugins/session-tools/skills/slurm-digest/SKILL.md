@@ -238,10 +238,10 @@ for what each one means and the exact header to write if the table has to be cre
    week-ending date. **Never lower `peak_MB`** — it is a running maximum across all weeks ever
    merged, so a week in which the job ran a smaller input leaves it untouched.
    If a row predates the `peak_MB` column, seed it as **`(peak_G + 0.05) * 1024`** — `peak_G` is
-   rounded to *nearest*, so a bare `peak_G * 1024` can sit up to 51.2 MB below the true peak and
-   would lower the recommendation on migration (true peak 16394 MB shows as `peak_G 16.0`: true
-   `rec_mem` 36 G, bare-seeded `rec_mem` 32 G). Say so in the report, and treat its `rec_mem` as a
-   lower bound until the next digest.
+   rounded to *nearest*, so a bare `peak_G * 1024` can sit up to 51.2 MB below the true peak and,
+   when that crosses a `mem_round_gb` boundary, lowers the recommendation on migration by a full
+   4 G (true peak 9462 MB shows as `peak_G 9.2`: true `rec_mem` 16 G, bare-seeded `rec_mem` 12 G).
+   Say so in the report, and treat its `rec_mem` as a lower bound until the next digest.
    **Skip rows flagged `IO-BOUND`.** That flag lives in the `notes` column of the job's
    **existing row in the sizing table** (the configured `table` path) — never in the incoming
    digest, which carries no such marker. Check the current table row before merging, not the
@@ -250,23 +250,41 @@ for what each one means and the exact header to write if the table has to be cre
    untouched** by Steps 7, 8 and 9 — peak, recommendations and notes alike.
 
 8. **Recompute `rec_mem` from the stored `peak_MB`.**
-   `rec_mem = policy.margin_multiplier x (peak_MB / 1024)` (default `margin_multiplier = 2`),
+   `rec_mem = (peak_MB / 1024) x (1 + policy.headroom_frac)` (default `headroom_frac = 0.30`),
    where `peak_MB` is **the row's stored full-precision peak after Step 7** — **not** this week's
    digest rows, and **not** the 1-decimal `peak_G` displayed in the table. Floor the result at
    `policy.mem_floor_gb` (default 8 G), then round UP to the next multiple of `policy.mem_round_gb`
    (default 4 G) — never down; this is a safety margin, so a peak that lands exactly on a multiple
    of `mem_round_gb` stays there, and any remainder pushes to the next multiple up. Worked example
-   at the default values: a stored peak of 13.2 G gives `2 x 13.2 = 26.4`, which rounds up to
-   28 G, not down to 24 G.
+   at the default values: a stored peak of 13.2 G gives `13.2 x 1.30 = 17.16`, which rounds up to
+   20 G, not down to 16 G.
+
+   **The margin applies to a running max, not a single observation.** `peak_MB` is the maximum
+   across every digest ever merged for this job name, so this is 30% above the **worst reading ever
+   seen** for it, not 30% above a typical week. That is what makes a margin this small defensible.
 
    **`rec_mem` must never decrease while `peak_MB` is unchanged.** Because it is a pure function of
    the stored `peak_MB` and the `policy` values, this holds automatically — but it is the property
    to check if the arithmetic is ever changed. Computing it from *this week's* peak instead would
-   break it: a job that peaked at 14963.82 MB (`peak_G 14.6`, `rec_mem 32G`) and then ran a smaller
-   input peaking at 5000 MB would keep `peak_G 14.6` but drop to `rec_mem 12G` — a recommendation
-   below the row's own recorded peak, and an OOM on the next full-size run.
+   break it: a job that peaked at 14963.82 MB (`peak_G 14.6`, `rec_mem 20G`) and then ran a smaller
+   input peaking at 5000 MB would keep `peak_G 14.6` but drop to `rec_mem 8G` — the floor, less
+   than half the row's own recorded peak, and an OOM on the next full-size run.
 
-   **These are the reviewed defaults, not hardcoded law** — a site that lowers `margin_multiplier`,
+   **`headroom_frac` is a smaller margin than the `2x` it replaced — not a different kind of
+   rule.** `peak_GB x 1.30` **is** a 1.3x multiplier; do not read the fractional form as
+   categorically safer. The old `2x` was calibrated on jobs running at 3–15% memory utilisation;
+   against a digest of jobs near 45% utilisation it recommended **more than the job had requested
+   for 6 of 27 job names** (e.g. a 512 G request that peaked at 341.8 G — well sized — was told to
+   ask for 684 G). Because an unknown-scope row may justify *raising* a request, those were
+   actionable, so the tool pushed well-sized jobs upward and spent queue time and per-user memory
+   cap to do it. At `0.30` that job gets 448 G and the raises-above-request rate falls to 1 of 27,
+   unchanged on low-utilisation digests. **Do not "restore" `2x`.**
+
+   **A recommendation above the request is still possible, and still intended.** What was removed
+   is the *systematic* overshoot on well-utilised jobs, not the ability to flag a job that
+   genuinely needs more than it asked for.
+
+   **These are the reviewed defaults, not hardcoded law** — a site that lowers `headroom_frac`,
    or any other `policy` value, in config is choosing more OOM risk in exchange for queue priority,
    and should make that choice deliberately, in config, not by editing this file.
 

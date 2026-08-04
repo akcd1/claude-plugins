@@ -13,7 +13,7 @@ read it. If it does not exist, the skills bootstrap it (below).
   "archive": "~/.claude/slurm-sizing/digests",
   "multi_user_digest": false,
   "policy": {
-    "margin_multiplier": 2,
+    "headroom_frac":     0.30,
     "mem_floor_gb":      8,
     "mem_round_gb":      4,
     "cpu_headroom":      1.5,
@@ -35,7 +35,7 @@ verbatim, and in particular do not copy a cluster name from anyone else's config
 | `log` | `~/.claude/slurm-sizing/jobs.tsv` | The submission log where scope is recorded. |
 | `archive` | `~/.claude/slurm-sizing/digests` | Directory of raw archived digests, one per week-ending date. |
 | `multi_user_digest` | `false` | This digest is known to contain other users' rows and should be filtered without halting. |
-| `policy.margin_multiplier` | `2` | `rec_mem` = this × peak. |
+| `policy.headroom_frac` | `0.30` | `rec_mem` = `peak_GB × (1 + this)`, floored and rounded up (below). |
 | `policy.mem_floor_gb` | `8` | Never recommend less than this. |
 | `policy.mem_round_gb` | `4` | Round `rec_mem` UP to a multiple of this. |
 | `policy.cpu_headroom` | `1.5` | `rec_cpu` = ceil(ReqCPU × CPUPct/100 × this), capped at `ReqCPU`. When a job name has several rows in one digest, `CPUPct` and `ReqCPU` are taken from that name's **maximum-`CPUPct`** row (below). |
@@ -44,8 +44,27 @@ verbatim, and in particular do not copy a cluster name from anyone else's config
 **The `policy` values are tunable defaults, not invariants — but they are the reviewed defaults,
 and changing them changes the safety properties.** In particular `mem_round_gb` rounds **UP**,
 never to nearest — a safety margin that rounds down is not a margin. A site that lowers
-`margin_multiplier` is choosing more OOM risk in exchange for queue priority, and should say so to
+`headroom_frac` is choosing more OOM risk in exchange for queue priority, and should say so to
 itself explicitly, in config, rather than by editing the skills.
+
+**Why `headroom_frac` and not a multiplier — read this before changing it back.** `peak_GB × 1.30`
+**is** arithmetically a 1.3x multiplier; the two forms are not different in kind, only in size.
+The margin used to be `2x`, and that was calibrated against jobs running at roughly 3–15% memory
+utilisation, where doubling a small peak is cheap. Measured against a digest whose jobs ran near
+45% utilisation, `2x` recommended **more memory than the job had requested for 6 of 27 job names** —
+e.g. a job that requested 512 G, peaked at 341.8 G and was therefore well sized got a 684 G
+recommendation. Since an unknown-scope row "may justify raising a request", those are actionable,
+so the tool would have pushed already-well-sized jobs *upward*, costing queue time and per-user
+memory cap: the exact harm it exists to prevent, inverted. At `headroom_frac = 0.30` that same job
+gets 448 G, and raises-above-request fall to 1 of 27 on the high-utilisation digest while staying
+unchanged on the low-utilisation one. **Do not "restore" `2x` on the belief that a fractional
+headroom is a categorically safer construction — it is the same construction with a smaller
+number, and the smaller number is the point.**
+
+**A recommendation above the request is still possible, and still intended.** The change removes a
+*systematic* overshoot on well-utilised jobs; it does not remove the tool's ability to say that a
+job genuinely needs more than it asked for. If a peak plus 30% exceeds the request, that is a real
+signal about under-provisioning, not a bug to clamp away.
 
 **Which row supplies `CPUPct` when a job name appears several times in one digest: the row with
 the MAXIMUM `CPUPct`, paired with that same row's `ReqCPU`.** Not the peak-memory row — the
@@ -252,26 +271,35 @@ On every merge, for each job name:
 ```
 peak_MB = max(existing peak_MB, this week's max UsedMem_MB)      # full precision, MB; a merge never lowers it
 peak_G  = round(peak_MB / 1024, 1)                               # display only
+peak_GB = peak_MB / 1024
 rec_mem = round_up_to(mem_round_gb,
-                      max(mem_floor_gb, margin_multiplier * peak_MB / 1024))
+                      max(mem_floor_gb, peak_GB * (1 + headroom_frac)))    # headroom_frac default 0.30
 ```
 
 `rec_mem` is a **pure function of the stored `peak_MB`** and the `policy` values. It is **not**
 computed from this week's digest rows, and **not** from `peak_G`.
 
+**The margin applies to a running max, not to a single observation.** `peak_MB` is the maximum
+across *every* digest ever merged for that job name, so `rec_mem` is 30% above the **worst reading
+ever seen** — not 30% above a typical week. That is what makes a margin this small defensible: the
+number it multiplies has already absorbed every bad week in the row's history.
+
 **`rec_mem` must never decrease while `peak_MB` is unchanged.** This is the property the whole
 table exists to guarantee, and it is the reason `peak_MB` is stored at all. Without it, a job whose
-peak was 14963.82 MB one week (→ `peak_G 14.6`, `rec_mem 32G`) and which runs a smaller input the
-next week (5000 MB) would keep `peak_G 14.6` but recompute `rec_mem` down to `12G` from this week's
-smaller number — a recommendation below the row's own recorded peak, and an OOM on the next real
-run. Recomputing from the stored `peak_MB` makes that arithmetically impossible.
+peak was 14963.82 MB one week (→ `peak_G 14.6`, `rec_mem 20G`) and which runs a smaller input the
+next week (5000 MB) would keep `peak_G 14.6` but recompute `rec_mem` down to `8G` — the floor —
+from this week's smaller number, a recommendation less than half the row's own recorded peak and an
+OOM on the next real run. Recomputing from the stored `peak_MB` makes that arithmetically
+impossible.
 
 If a legacy table has no `peak_MB` column, add it and seed it as **`(peak_G + 0.05) * 1024`**. The
 `+ 0.05` is not padding, it is the rounding correction: `peak_G` is rounded to **nearest**, so a
-bare `peak_G * 1024` can sit up to 51.2 MB *below* the true peak and migration would then lower a
-recommendation — e.g. a true peak of 16394 MB displays as `peak_G 16.0`, whose true `rec_mem` is
-36 G but whose bare-seeded `rec_mem` is 32 G, a 4 G drop in exactly the direction this column
-exists to prevent. Seeding at the top of the rounding interval cannot go low. Say so in the report,
+bare `peak_G * 1024` can sit up to 51.2 MB *below* the true peak. Whether that 51.2 MB changes
+`rec_mem` depends on where it falls against the `mem_round_gb` step — but when it does cross a
+boundary it costs a full 4 G, in exactly the direction this column exists to prevent. Worked case:
+a true peak of 9462 MB displays as `peak_G 9.2`; its true `rec_mem` is 16 G, its bare-seeded
+`rec_mem` is 12 G, and the corrected seed `(9.2 + 0.05) * 1024 = 9472 MB` gives 16 G again. Seeding
+at the top of the rounding interval cannot go low. Say so in the report,
 and treat every such row's `rec_mem` as a lower bound until the next digest refreshes it.
 
 **The `IO-BOUND` flag: how it is set, and what it does**
