@@ -46,21 +46,39 @@ Merge the Slurm digest pasted below into the sizing table at the configured `tab
 [../slurm-sizing/reference/config.md](../slurm-sizing/reference/config.md) → "Table file format"
 for what each one means and the exact header to write if the table has to be created.
 
+## Hard stops
+
+Several points below say to ask the user. Those marked **HARD STOP** are halts, not suggestions:
+stop, report what you need, and **do not proceed on a default**. **Running unattended is not
+permission to continue** — if there is no human to answer, stop and report that the merge did not
+run, rather than choosing a value. Proceeding silently past one of these is how an unsafe number
+enters the table; everything else here is built so the *conservative* outcome is the automatic one,
+and a hard stop marks the places where there is no conservative outcome to fall back to.
+
+The hard stops in this skill are: **a missing week-ending date, and an already-archived digest
+(Step 1)**; **the first multi-user digest encounter (Step 3)**; and **every question in Bootstrap**
+(`digest_cluster`, `digest_user`, decline — see the config contract).
+
+**Step 10's scope prompt is deliberately NOT a hard stop.** Its unanswered outcome is a documented
+conservative one — `scope: unknown` with a `>=` prefix — and the merge completes. The distinction
+throughout is whether continuing requires *assuming* something unverified.
+
 ## Procedure
 
 1. **Establish the week-ending date, then refuse duplicates (precondition — check this FIRST,
    before parsing or merging anything).** The digest's date is **a required argument**, supplied
    alongside the pasted table (e.g. `/session-tools:slurm-digest 2026-08-01 <pasted digest>`). The
    digest body itself contains no date column, so it cannot be recovered from the paste.
-   **If the date is missing, ASK for it — never assume today's date.** Defaulting to today lets the
-   same digest pasted on two different days archive under two filenames, pass this duplicate check
-   both times, and double `n` — exactly the corruption this step exists to prevent.
+   **If the date is missing: HARD STOP — ask for it, and never assume today's date.** Defaulting to
+   today lets the same digest pasted on two different days archive under two filenames, pass this
+   duplicate check both times, and double `n` — exactly the corruption this step exists to prevent.
    With the date in hand, check whether `<archive>/YYYY-MM-DD.tsv` already exists for it (`Read`
    it; a "no such file" error is the not-archived case), where `<archive>` is the configured
    `archive` path (default `~/.claude/slurm-sizing/digests`).
-   **If it exists, STOP here: change nothing** — do not parse, join, merge, or write anything —
-   report that the digest is already archived for that date, and ask whether to force. Re-merging
-   an already-counted digest would inflate `n` (nine `score` runs would read as eighteen), and `n`
+   **If it exists: HARD STOP — change nothing** — do not parse, join, merge, or write anything —
+   report that the digest is already archived for that date, and ask whether to force. A forced
+   re-merge requires an explicit human instruction; unattended, stop and report. Re-merging
+   an already-counted digest would inflate `n` (nine runs of a name would read as eighteen), and `n`
    is the signal that says whether a recommendation is trustworthy. Only proceed past this step
    if no file exists for that date, or the user has explicitly instructed you to force a
    re-merge.
@@ -90,7 +108,8 @@ for what each one means and the exact header to write if the table has to be cre
    with no error anywhere, so this filter runs before anything downstream sees a row. Precisely
    what to do when other users' rows appear — ask once, then remember:
    - **First time** (`multi_user_digest` is unset or `false` in config) **and other users are
-     present:** HALT before merging anything. Report which other users are present and how many
+     present:** **HARD STOP** — halt before merging anything, and halt even when running
+     unattended; do not filter on a default. Report which other users are present and how many
      rows each has, and ask whether this is a shared digest that should be filtered to
      `digest_user`.
    - **On confirmation:** write `"multi_user_digest": true` into the config, then proceed,

@@ -133,7 +133,8 @@ input; guessing whose rows to keep is not.
 
 Precisely what to do when other users' rows appear — **ask once, then remember**:
 
-- **First time:** HALT before merging anything. Report which other users are present and how many
+- **First time:** **HARD STOP** — halt before merging anything, and halt even when running
+  unattended; do not filter on a default. Report which other users are present and how many
   rows each has, and ask whether this is a shared digest that should be filtered to `digest_user`.
 - **On confirmation:** write `"multi_user_digest": true` into the config, then proceed, filtering
   to `digest_user` and reporting the filtered-out count each week thereafter. Do not halt again.
@@ -173,7 +174,11 @@ directories as needed when bootstrapping. The config file's own location is fixe
 
 ## Bootstrap (first run, nothing exists yet)
 
-**Config missing:**
+**Config missing:** every question in this branch is a **HARD STOP** — `digest_cluster`,
+`digest_user`, and the decline option all require an answer from the user. **Running unattended is
+not permission to pick one**: stop and report that bootstrap could not complete. A guessed cluster
+name makes `slurm-sizing` inert or wrong forever; a guessed account name filters out every one of
+the user's own rows. Neither failure announces itself.
 
 1. **Check for a pre-plugin layout first** — two files and one **directory**, where an early
    hand-rolled version kept its data. Probe all three with `test`, which answers for a directory as
@@ -332,13 +337,22 @@ from a real in-process measurement instead.
 1. Obtain **in-process** evidence of the job's real peak RSS: `resource.getrusage(...).ru_maxrss`
    inside the job, a `psutil`-style RSS sampler, or a memory profiler. `sacct`/digest numbers are
    exactly what the flag exists to distrust, so they can never justify setting it.
-2. Set the row's `peak_MB` to that measured peak, and let `peak_G` / `rec_mem` follow from it by
-   the formulas above.
-3. **Append** `IO-BOUND` to the `notes` column, keeping any existing note text, and say where the
+2. Set the row's `peak_MB` to that measured peak, and `peak_G` to its display rounding.
+3. Set `rec_mem` **by hand**, from the same in-process evidence — see the reconciliation note below.
+4. **Append** `IO-BOUND` to the `notes` column, keeping any existing note text, and say where the
    measurement came from — e.g. `IO-BOUND (getrusage peak 3.2G, 2026-08-03); CPUPct 45`.
 
 *What it does* — `slurm-digest` leaves an `IO-BOUND` row alone: its peak is not merged, its
 `rec_mem`/`rec_cpu` are not recomputed, and its `notes` are not rewritten. `slurm-sizing` trusts
 the pinned row over any `sacct`-derived figure for the same job.
+
+**A pinned row's `rec_mem` does not reconcile with the formula, by design.** Every other row
+satisfies `rec_mem = round_up_to(mem_round_gb, max(mem_floor_gb, peak_GB * (1 + headroom_frac)))`.
+An `IO-BOUND` row does **not**: its `rec_mem` is **hand-set from in-process evidence and is
+deliberately not derived from `peak_MB`**, so recomputing the formula against that row's `peak_MB`
+can give a different number in either direction. **That mismatch is expected and must not be
+"corrected."** It is not a data-integrity gap, and anything that "fixes" it silently throws away
+the in-process measurement that is the row's entire justification. Validate a pinned row by its
+recorded evidence, never by re-deriving it.
 
 *Removing it* requires the same class of evidence that set it — never a digest, never `sacct`.
