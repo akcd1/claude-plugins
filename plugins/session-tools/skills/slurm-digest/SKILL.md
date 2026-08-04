@@ -6,7 +6,7 @@ description: >-
   week-ending date it covers, then run it explicitly; this skill does not trigger on its own the
   way slurm-sizing does.
 user-invocable: true
-allowed-tools: Read, Write, Edit, Bash(test *), Bash(mkdir *), Bash(grep *), Bash(awk *), Bash(sacct *), Bash(sacctmgr *), Bash(scontrol *)
+allowed-tools: Read, Write, Edit, Bash(test *), Bash(mkdir *), Bash(grep *), Bash(awk *), Bash(sacct *), Bash(scontrol *)
 ---
 
 # Slurm Digest Merge
@@ -132,12 +132,22 @@ throughout is whether continuing requires *assuming* something unverified.
    configured `log` path (default `~/.claude/slurm-sizing/jobs.tsv`) is tab-separated and begins
    with `#`-prefixed comment lines before its header row
    `cluster	jobid	submitted	job_name	scope	cwd`.
-   **Digests come from the configured `digest_cluster` only; the log's rows carry their own
-   `cluster` value, which may name a different cluster for jobs submitted elsewhere.**
-   `digest_cluster` and other clusters are separate Slurm ID namespaces — the same `jobid` number
-   can label unrelated jobs on each one — so a bare `jobid` lookup is a correctness bug: it will
-   silently splice an unrelated cluster's job onto this digest's scope and produce a confidently
-   wrong recommendation. Joining on `jobid` alone is never acceptable, even as a shortcut.
+   **The `cluster` column holds a composed identity, `<ClusterName>@<SlurmctldHost>`** (e.g.
+   `alpha@ctl-1`), and so does `digest_cluster`. Digests come from the configured `digest_cluster`
+   only; the log's rows carry their own identity, which may name a different cluster for jobs
+   submitted elsewhere — `~/.claude` is often shared/NFS storage, so one log routinely receives
+   rows from every cluster its owner touches. Separate clusters are separate Slurm ID namespaces —
+   the same `jobid` number can label unrelated jobs on each — so a bare `jobid` lookup is a
+   correctness bug: it will silently splice an unrelated cluster's job onto this digest's scope and
+   produce a confidently wrong recommendation. Joining on `jobid` alone is never acceptable, even
+   as a shortcut.
+
+   **And matching on a bare `ClusterName` is not sufficient either.** A `ClusterName` is a locally
+   chosen label with no uniqueness guarantee: **two clusters reachable from one shared home were
+   found reporting the same `ClusterName` while having separate controllers, separate accounting
+   databases and independent job-ID spaces.** That is why the identity carries the controller host —
+   two clusters with independent job-ID spaces necessarily have distinct controllers. Compare the
+   whole composed string, never just the part before the `@`.
 
    **Do this with a real shell command, not by reasoning over `Read` output**, so the composite key
    and the tab delimiter are actually enforced. One `awk` lookup does all of it — comment
@@ -161,11 +171,21 @@ throughout is whether continuing requires *assuming* something unverified.
      field and needs both inputs pre-sorted, while this log is append-ordered.
    - **`grep -v '^#'`** — the comment header is not data.
 
+   **Legacy rows carrying a bare cluster name are unverified and must not match.** Rows written
+   before the composed identity existed hold just a `ClusterName`, which may belong to any cluster
+   with that name. The `$1 == c` test already excludes them, since `c` contains an `@` — that is
+   the correct outcome, not a bug to work around. **Do not relax the comparison to match on the
+   `ClusterName` part, and do not rewrite such rows**: no evidence survives about which cluster
+   wrote them, so either would manufacture provenance. Count them and report how many log rows were
+   skipped as unverified-legacy, so a drop in matches is visibly the transition rather than a
+   malfunction. New rows carry the composed identity, so this fades on its own.
+
    A digest row with no output line gets `scope: unknown`. **If zero rows match, say so
    prominently** — a silently failing lookup makes every recommendation a lower bound and the
    system quietly stops working. Because `slurm-sizing` refuses to log on any cluster other than
    `digest_cluster`, a populated log should contain `digest_cluster` rows; a zero match against a
-   non-empty log means the lookup is broken, not that there was nothing to find.
+   non-empty log means the lookup is broken (or every row is unverified legacy, per above), not
+   that there was nothing to find.
 
 6. **Enrich unmatched rows from `sacct` — a conditional recovery procedure, not part of the
    lookup.** For every digest row that did NOT match a submission-log entry in Step 5, attempt to
@@ -183,19 +203,27 @@ throughout is whether continuing requires *assuming* something unverified.
      retention gap). Keep the original suffixed ID on the digest row for reporting; normalise only
      the lookup key.
    - **Cluster guard, checked first.** `sacct` only sees the LOCAL cluster's accounting
-     database — **verified in practice**: a job ID from the digest's cluster does not resolve
-     via `sacct` run against a different cluster's accounting database (`sacct -L -j <jobid>`
-     returns nothing for it there), and `sacctmgr -n -P list cluster format=Cluster` lists only
-     the local cluster's name. Determine the local cluster with the **shared procedure** in
+     database — **verified in practice**: a job ID from another cluster does not resolve via
+     `sacct` run against this one's accounting database (`sacct -L -j <jobid>` returns nothing for
+     it there). Determine the **local cluster identity** with the **shared procedure** in
      [../slurm-sizing/reference/config.md](../slurm-sizing/reference/config.md) → "Determining the
-     local cluster" (`sacctmgr -n -P list cluster format=Cluster`, falling back to
-     `scontrol show config | grep ClusterName`, taking the value after the `=`) — **never
-     `hostname`**, which returns a node name, not a cluster name, and would therefore fail this
+     local cluster identity":
+
+     ```bash
+     scontrol show config | grep -E 'ClusterName|SlurmctldHost\[0\]'
+     ```
+
+     Take the value after each `=`, trimmed, and compose `<ClusterName>@<SlurmctldHost>` — **never
+     `hostname`**, which returns a node name, not a cluster identity, and would therefore fail this
      comparison on essentially every site while reporting the result as a deliberate skip. Compare
-     it to the digest's cluster (`digest_cluster` from config). If they differ, **skip enrichment
-     entirely** for the whole digest — do not query `sacct` — and say so plainly in the report
-     (Step 12). If the local cluster is undeterminable, treat that the same way: skip and say so.
-     Never fabricate a scope to compensate.
+     the **whole composed string** to `digest_cluster` from config; **comparing only the
+     `ClusterName` part is not sufficient** — two clusters reachable from one shared home were
+     found reporting the same `ClusterName` with independent job-ID spaces, so a name-only match
+     would query the wrong accounting database and silently attach another cluster's submit line as
+     this job's scope. If they differ, **skip enrichment entirely** for the whole digest — do not
+     query `sacct` — and say so plainly in the report (Step 12). If either field is missing, the
+     local identity is undeterminable: skip and say so, and do **not** fall back to the bare
+     `ClusterName`. Never fabricate a scope to compensate.
    - **Batch query, one field per call — never a combined multi-field query.** Query once for
      every unmatched row, not per row, but query `SubmitLine` and `WorkDir` in **separate** calls:
      `sacct -j <comma-separated jobids> --format=JobID,SubmitLine --parsable2 --noheader` and, only

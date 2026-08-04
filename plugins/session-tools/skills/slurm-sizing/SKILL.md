@@ -12,7 +12,7 @@ description: >-
   about Slurm resource sizing. SKIP only when no cluster job is involved at any remove, or when
   the user has turned this system off (`"enabled": false` in its config).
 user-invocable: true
-allowed-tools: Read, Write, Edit, Bash(test *), Bash(mkdir *), Bash(sacctmgr *), Bash(scontrol *), Bash(grep *)
+allowed-tools: Read, Write, Edit, Bash(test *), Bash(mkdir *), Bash(scontrol *), Bash(grep *)
 ---
 
 # Slurm Job Sizing
@@ -39,21 +39,31 @@ data paths inside it are configurable).
 
 ## 1. Cluster gate — check this before anything else
 
-1. Read `digest_cluster` from the config.
-2. Determine the local cluster using the shared procedure in
-   [reference/config.md](reference/config.md) → "Determining the local cluster":
-   `sacctmgr -n -P list cluster format=Cluster`, falling back to
-   `scontrol show config | grep ClusterName` (take the value after the `=`, trimmed). **Never use
+1. Read `digest_cluster` from the config. It holds a **composed identity**,
+   `<ClusterName>@<SlurmctldHost>` (e.g. `alpha@ctl-1`) — not a bare cluster name.
+2. Determine the **local cluster identity** using the shared procedure in
+   [reference/config.md](reference/config.md) → "Determining the local cluster identity":
+
+   ```bash
+   scontrol show config | grep -E 'ClusterName|SlurmctldHost\[0\]'
+   ```
+
+   Take the value after each `=`, trimmed, and compose `<ClusterName>@<SlurmctldHost>`. **Never use
    `hostname`** — it names a node, not a cluster.
-   - **Both commands fail or return nothing:** the local cluster is undeterminable. Say so
-     explicitly and STOP — do not consult the table, do not append to the log. "Unknown" is never
-     treated as a match.
-3. Compare the two values — an exact string match.
+   - **Either field is missing, or the command fails:** the local identity is undeterminable. Say
+     so explicitly and STOP — do not consult the table, do not append to the log. **Do not fall
+     back to the bare `ClusterName`** — that is the unsafe key this composition replaces.
+     "Unknown" is never treated as a match.
+3. Compare the two composed identities — an exact string match.
    - **They match:** proceed to §2.
-   - **They differ:** say so explicitly (name both clusters) and STOP. Do not consult the table
+   - **They differ:** say so explicitly (name both identities) and STOP. Do not consult the table
      and do not append to the log. This system is inert on any cluster other than the one the
      digest was built from — job IDs collide across clusters (see §5), so numbers from the wrong
      cluster are worse than no numbers at all.
+   - **`digest_cluster` is a bare name with no `@`** (written before this rule existed): treat it
+     as **unverified** — it may name any cluster carrying that `ClusterName`. Say so and STOP,
+     asking the user to re-derive it through Bootstrap (§6). Do not silently upgrade it by
+     appending the local controller host: that asserts provenance nobody recorded.
 
 ## 2. Before sizing any job — read the table first
 
@@ -189,20 +199,38 @@ cluster	jobid	submitted	job_name	scope	cwd
 ```
 
 - **Log file does not exist:** go to **Bootstrap** (§6), then append the row.
-- `cluster` must be the exact `digest_cluster` string from the config — the digest merge filters
-  log rows by exact match on this column, so a variant spelling makes the row invisible.
+- `cluster` must be the exact `digest_cluster` string from the config — the full composed
+  `<ClusterName>@<SlurmctldHost>` identity, never a bare cluster name. The digest merge filters log
+  rows by exact match on this column, so a variant spelling makes the row invisible, and a bare
+  name makes it **unverifiable** (see §5).
 - `scope` is a short, concrete description of the workload this run did — e.g.
   "12 tasks x 1565 tiles (FULL)", "5 of 100 perturbations" — not a repeat of the job name.
 - A peak logged with no `scope` is only ever a lower bound: once the job has finished, `sacct` has
   no way to recover what it actually processed. Write the scope now, while it's known, even before
   the peak usage is known.
 
-## 5. Why `cluster` is the first column
+## 5. Why `cluster` is the first column, and why it is a composed identity
 
 Job IDs are not unique across clusters — two different clusters can each have a job `123456`. The
 join key for this whole system is the pair `(cluster, jobid)`, never `jobid` alone. Putting
 `cluster` first keeps that join key visible and stops one cluster's workload scope from silently
 attaching to another cluster's job.
+
+**But a bare cluster name is not a safe value for that column.** A Slurm `ClusterName` is a locally
+chosen label with no guarantee of uniqueness across the clusters one person can reach. **Two
+clusters reachable from one shared home directory were found reporting the same `ClusterName`,
+with separate controllers, separate accounting databases and independent job-ID spaces** — the same
+job number naming two unrelated jobs depending on which host you asked. Because `~/.claude` is
+often on shared/NFS storage, one log receives rows from both, tagged identically. That is the exact
+corruption this key exists to prevent, so the key must be
+**`<ClusterName>@<SlurmctldHost>` + jobid**. Two clusters with independent job-ID spaces
+necessarily have distinct controllers, so the suffix separates them; where `ClusterName` is already
+unique it changes nothing.
+
+**Legacy rows written with a bare name are unverified.** They may have come from any cluster with
+that name, so they must **not** be used to satisfy a scope match — treat them as no match and leave
+the row `>=`. Never rewrite one into a composed identity: no evidence survives about which cluster
+wrote it, and inventing one manufactures provenance.
 
 ## 6. Bootstrap — config, table, or log missing
 
