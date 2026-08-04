@@ -69,7 +69,14 @@ for what each one means and the exact header to write if the table has to be cre
    `UsedMem`, `MemPct`, `ReqCPU`, `UsedCPU`, `CPUPct`, `Elapsed`. Memory columns are in
    **megabytes**. Where a `(M)` suffix appears on those column names, it states the unit and is
    **not** part of the header text: do not require the literal `(M)` to be present, and do not
-   reject a digest over it. Skip the `OVERALL` summary line. Also skip rows whose `JobName` is a
+   reject a digest over it.
+
+   **`UsedCPU` is CPU *time*, not a core count**, despite the name — it holds durations such as
+   `01:56:53` or `00:08.791`. **This procedure deliberately never consumes it**; every CPU
+   recommendation comes from `ReqCPU` and `CPUPct` (Step 9). Do not treat it as a number of cores
+   in any future edit — doing so would silently produce recommendations in the wrong unit.
+
+   Skip the `OVERALL` summary line. Also skip rows whose `JobName` is a
    bare shell or interpreter rather than a real job — these carry no workload identity, so their
    peaks cannot be attributed to anything. The list, which is **extensible**: `bash`, `sh`, `zsh`,
    `csh`, `tcsh`, `ksh`, `dash`, `python`, `python2`, `python3`, `perl`, `ruby`, `Rscript`, `R`,
@@ -143,10 +150,19 @@ for what each one means and the exact header to write if the table has to be cre
 
 6. **Enrich unmatched rows from `sacct` — a conditional recovery procedure, not part of the
    lookup.** For every digest row that did NOT match a submission-log entry in Step 5, attempt to
-   recover a *derived* scope directly from Slurm before falling back to `scope: unknown`. The six
-   bullets below are sequential and order-dependent — cluster guard, then batch query, then
-   discard step rows, then collapse array rows, then the miss guard, then record — treat them as
-   an ordered procedure to follow in full, not as loose elaboration on the lookup.
+   recover a *derived* scope directly from Slurm before falling back to `scope: unknown`. The seven
+   bullets below are sequential and order-dependent — normalise the digest's own JobIDs, cluster
+   guard, batch query, discard step rows, collapse array rows, the miss guard, then record — treat
+   them as an ordered procedure to follow in full, not as loose elaboration on the lookup.
+   - **Normalise the digest's own `JobID` to a base ID first — array-task suffixes appear on BOTH
+     sides.** Do not assume the digest carries bare base IDs; real digests routinely carry
+     array-task IDs such as `7932156_0`, `7932157_0`, `7932158_1`. Before using a digest `JobID`
+     as an enrichment lookup key, strip any `_<task>` suffix exactly as the array bullet below
+     strips it from `sacct`'s rows — the same normalisation, applied to both sides, so the two
+     agree on what "the job" is. Querying `sacct` with an unnormalised `7932156_0` narrows the
+     result to one task at best and misses at worst, and the miss is silent (it looks like a
+     retention gap). Keep the original suffixed ID on the digest row for reporting; normalise only
+     the lookup key.
    - **Cluster guard, checked first.** `sacct` only sees the LOCAL cluster's accounting
      database — **verified in practice**: a job ID from the digest's cluster does not resolve
      via `sacct` run against a different cluster's accounting database (`sacct -L -j <jobid>`
@@ -181,8 +197,10 @@ for what each one means and the exact header to write if the table has to be cre
      contains a `.` before doing anything else with the result; only bare (`<jobid>`) or
      array-task (`<jobid>_<task>`) rows carry real data.
    - **Array jobs: map task rows back to the digest's base job, then collapse to one scope.** A
-     digest row for an array job has a bare base `JobID` (e.g. `7932156`); `sacct` returns one row
-     per task (`7932156_0` … `7932156_11`) plus that task's step rows. After discarding step rows,
+     digest row for an array job carries either a bare base `JobID` (e.g. `7932156`) or an
+     array-task ID (e.g. `7932156_0`) — normalised to the base by the first bullet either way;
+     `sacct` returns one row per task (`7932156_0` … `7932156_11`) plus that task's step rows,
+     so the suffix can be present on both sides. After discarding step rows,
      strip the `_<task>` suffix to correlate each surviving row back to the base job. The
      surviving task rows for one base job carry an identical `SubmitLine` (it's the same `sbatch`
      invocation) — take one as the scope. If they somehow differ, record the first and add a note
@@ -292,19 +310,38 @@ for what each one means and the exact header to write if the table has to be cre
    (or empty on a new row), and say so in the report rather than emitting a floor value that looks
    measured.
 
-   Record the observed maximum `CPUPct` in `notes` **additively**: `notes` is one shared free-text column
-   that also holds the load-bearing `IO-BOUND` flag and any human annotation. Update or append the
-   `CPUPct` fragment while **preserving every other fragment already in the cell** — never
-   overwrite the column with a bare `CPUPct <n>`. Use a separated form such as
-   `IO-BOUND (getrusage peak 3.2G); CPUPct 45` so fragments stay individually editable.
+   Record the observed maximum `CPUPct` in `notes` **additively**: `notes` is one shared free-text
+   column that also holds the load-bearing `IO-BOUND` flag and any human annotation. The two cases:
+   - **`notes` is empty** (a new row, or a row never annotated): write exactly `CPUPct <value>`.
+   - **`notes` already has content**: append `; CPUPct <value>` after what is there, or update an
+     existing `CPUPct` fragment in place — e.g. `IO-BOUND (getrusage peak 3.2G); CPUPct 45`. The
+     `; ` separator keeps fragments individually editable.
+
+   **Appending never rewrites what is already there.** Preserve every other fragment in the cell;
+   never replace the column with a bare `CPUPct <n>` when it held anything else.
    **`IO-BOUND` rows are exempt from this step**, as from Steps 7 and 8: do not recompute their
    `rec_cpu` and do not touch their `notes`. An overwritten note erases the flag, and the next
    week's page-cache MaxRSS then enters the peak — the exact failure the flag exists to prevent.
 
-10. **Prompt for scope.** List unmatched job names ranked by wasted reservation
-    `(ReqMem - rec_mem) x n`, largest first, capped at 10. Ask the user to supply scope for those.
-    Rank by waste, not recency: scope on a 9-run 200 G job is worth ~1,584 G; scope on a one-off
-    8 G job is worth nothing. Names left unanswered stay `unknown` and carry forward.
+10. **Prompt for scope.** List unmatched job names ranked by wasted reservation, largest first,
+    capped at 10. Ask the user to supply scope for those.
+
+    **Compute the ranking key explicitly — the two inputs are in different units and one of them
+    is a string.** `ReqMem` is in **megabytes** (Step 2); `rec_mem` is a **string in gigabytes**
+    carrying a `G` suffix and often a `>=` prefix, so `204800.00 - ">= 28G"` is not arithmetic.
+    Normalise both to GB first:
+
+    ```
+    rec_mem_GB = number(rec_mem with any ">=" prefix and the trailing "G" stripped)   # e.g. ">= 28G" -> 28
+    ReqMem_GB  = ReqMem / 1024                                                        # MB -> GB
+    waste_GB   = (ReqMem_GB - rec_mem_GB) x n
+    ```
+
+    Rank by `waste_GB` — **units are gigabytes** — not by recency: scope on a 9-run 200 G job is
+    worth ~1,584 G; scope on a one-off 8 G job is worth nothing. This ranking decides which jobs
+    the user is asked about, which is the only mechanism that turns `>=` rows into real
+    recommendations, so a mis-ordered list has a real cost. Names left unanswered stay `unknown`
+    and carry forward.
     **Show derived evidence alongside the prompt.** For any unmatched name Step 6 enriched with a
     `derived:` scope, display that derived submit line next to it so the human can confirm or
     correct it. **Both confirmation and correction promote it identically:** whether the human
@@ -323,9 +360,32 @@ for what each one means and the exact header to write if the table has to be cre
     operation.
 
 12. **Report.** State: the week-ending date merged, rows parsed, rows dropped as capped, scope
-    matches from the log, job names updated, job names new, peaks that rose, and the total
-    reservation delta if the recommendations were applied. Be explicit that `>=` rows are not
-    actionable for sizing down.
+    matches from the log, job names updated, job names new, and peaks that rose.
+
+    **Reservation delta — define it, and report it as TWO figures.** Over the rows merged this
+    week, using the same GB normalisation as Step 10 (`ReqMem_GB = ReqMem / 1024`; `rec_mem_GB` =
+    `rec_mem` with any `>=` prefix and trailing `G` stripped):
+
+    ```
+    delta_GB = sum over merged rows of (ReqMem_GB - rec_mem_GB)
+    ```
+
+    Report it split, never as one number:
+    - **Actionable subtotal** — summed over rows whose `rec_mem` has **no** `>=` prefix. This is
+      reservation that can actually be given back now.
+    - **Pending-scope subtotal** — summed over rows whose `rec_mem` **does** carry `>=`. This is
+      not actionable; it is what capturing scope would unlock.
+
+    Merging the two into a single figure would contradict this step's own statement that `>=` rows
+    are not actionable for sizing down, and the split is the more useful number anyway. Say the
+    units (GB) and be explicit that `>=` rows are not actionable for sizing down.
+
+    **Flag job names that look like an unexpanded shell variable.** If any merged job name contains
+    `${` or a bare `$` (e.g. a name like `${USER}_probe`), call it out as a probable quoting bug in
+    the submitting script — the name reached Slurm unexpanded. Do **not** skip or drop such a row:
+    it is a real job and its measurements are real, so it merges normally. But the job name is this
+    system's merge key, so an unexpanded name will never aggregate with the sibling runs it was
+    meant to share a row with, and the user should know that before trusting its `n`.
     Also state: how many unmatched rows were enriched with a `derived:` scope from `sacct`, how
     many attempted enrichments missed (empty `SubmitLine` / retention gap), and whether
     enrichment was skipped entirely because the digest's cluster differs from the local cluster,
