@@ -12,7 +12,7 @@ description: >-
   about Slurm resource sizing. SKIP only when no cluster job is involved at any remove, or when
   the user has turned this system off (`"enabled": false` in its config).
 user-invocable: true
-allowed-tools: Read, Write, Edit, Bash(test *), Bash(mkdir *), Bash(scontrol *), Bash(sacctmgr *), Bash(hostname *), Bash(grep *)
+allowed-tools: Read, Write, Edit, Bash(test *), Bash(mkdir *), Bash(scontrol *), Bash(sacctmgr *), Bash(hostname *), Bash(echo *), Bash(grep *)
 ---
 
 # Slurm Job Sizing
@@ -40,7 +40,7 @@ data paths inside it are configurable).
 ## 1. Cluster gate — check this before anything else
 
 1. Read `digest_cluster` from the config. It holds a **composed identity**,
-   `<ClusterName>@<short hostname>` (e.g. `alpha@login-1`) — not a bare cluster name.
+   `<ClusterName>@<short submit hostname>` (e.g. `alpha@login-1`) — not a bare cluster name.
 2. Determine the **local cluster identity** using the shared procedure in
    [reference/config.md](reference/config.md) → "Determining the local cluster identity". In brief —
    a **three-step chain**, so a missing `scontrol` degrades the identity instead of disabling the
@@ -49,19 +49,30 @@ data paths inside it are configurable).
    ```bash
    scontrol show config | grep -E '^ClusterName'      # 1. the cluster name
    sacctmgr -n -P list cluster format=Cluster         # 2. only if step 1 gave nothing
-   hostname -s                                        # the suffix: where the command was typed
+   echo "${SLURM_SUBMIT_HOST:-$(hostname -s)}"        # the suffix: where the command was typed
    ```
 
    Take the value after the `=` (step 1) or the single field (step 2), trimmed, and compose
-   `<ClusterName>@<short hostname>`. The hostname is the **suffix, never the whole identity** —
-   except in the hostname-only fallback below, where no `ClusterName` could be read at all.
-   - **Neither `scontrol` nor `sacctmgr` yields a `ClusterName`:** use the **bare short hostname as
-     the whole identity**, and **say so explicitly in this run's report** — name the fallback and
-     say the identity is less specific than usual. The point of reporting it is that the user is
-     otherwise silently working under a different key than they expect. Do not stop for this: a
-     reported, degraded identity beats going inert.
-   - **The short hostname itself cannot be read:** the identity is undeterminable. Say so
-     explicitly and STOP — do not consult the table, do not append to the log. **Do not fall back
+   `<ClusterName>@<short submit hostname>`. The host is the **suffix, never the whole identity** —
+   except in the host-only fallback below, where no `ClusterName` could be read at all.
+
+   **`SLURM_SUBMIT_HOST` first, `hostname -s` only as its fallback — do not "simplify" this back to
+   a bare `hostname`.** Inside an allocation (an `srun --pty bash` session, or anything running
+   under `sbatch`) `hostname` names the **compute node**, not the machine the user submitted from.
+   Slurm sets `SLURM_SUBMIT_HOST` exactly in those contexts and leaves it unset on a login node, so
+   the one expression is correct in both. **The identity must not change just because the user is
+   working in an interactive session**: a bare `hostname` would mint `alpha@node-17` for that whole
+   session, equal no configured `digest_cluster`, and stand the skill down until the session ended —
+   which looks broken rather than degraded. Interactive `srun --pty` sessions are ordinary working
+   practice, not a corner case.
+   - **Neither `scontrol` nor `sacctmgr` yields a `ClusterName`:** use the **bare short submit
+     hostname as the whole identity** — resolved the same way, `SLURM_SUBMIT_HOST` before
+     `hostname -s` — and **say so explicitly in this run's report**: name the fallback and say the
+     identity is less specific than usual. The point of reporting it is that the user is otherwise
+     silently working under a different key than they expect. Do not stop for this: a reported,
+     degraded identity beats going inert.
+   - **Neither `SLURM_SUBMIT_HOST` nor a hostname can be read:** the identity is undeterminable. Say
+     so explicitly and STOP — do not consult the table, do not append to the log. **Do not fall back
      to the bare `ClusterName`** — that is the unsafe key this composition replaces. "Unknown" is
      never treated as a match.
 3. Compare the two identities — an exact string match.
@@ -74,13 +85,13 @@ data paths inside it are configurable).
    - **`digest_cluster` is a bare name with no `@`, and the local identity has one** (i.e. the
      config predates this rule): treat it as **unverified** — it may name any cluster carrying that
      `ClusterName`. Say so and STOP, asking the user to re-derive it through Bootstrap (§6). Do not
-     silently upgrade it by appending the local hostname: that asserts provenance nobody recorded.
-   - **Both sides are bare** (the local identity came from the hostname-only fallback above): an
-     exact match is a match — a hostname is host-specific, so this is the intended way a
-     fallback-bootstrapped site keeps working. Report that both sides are hostname-only. One
-     residual ambiguity is worth naming once: a legacy bare `ClusterName` that happens to equal
-     this host's short hostname would also match here, so if the config predates this rule,
-     re-derive it through Bootstrap (§6).
+     silently upgrade it by appending the local host: that asserts provenance nobody recorded.
+   - **Both sides are bare** (the local identity came from the host-only fallback above): an exact
+     match is a match — a submit hostname is host-specific, so this is the intended way a
+     fallback-bootstrapped site keeps working. Report that both sides are host-only. One residual
+     ambiguity is worth naming once: a legacy bare `ClusterName` that happens to equal this host's
+     short submit hostname would also match here, so if the config predates this rule, re-derive it
+     through Bootstrap (§6).
 
 ## 2. Before sizing any job — read the table first
 
@@ -217,7 +228,7 @@ cluster	jobid	submitted	job_name	scope	cwd
 
 - **Log file does not exist:** go to **Bootstrap** (§6), then append the row.
 - `cluster` must be the exact `digest_cluster` string from the config — the full composed
-  `<ClusterName>@<short hostname>` identity, never a bare cluster name. The digest merge filters log
+  `<ClusterName>@<short submit hostname>` identity, never a bare cluster name. The digest merge filters log
   rows by exact match on this column, so a variant spelling makes the row invisible, and a bare
   name makes it **unverifiable** (see §5).
 - `scope` is a short, concrete description of the workload this run did — e.g.
@@ -240,7 +251,7 @@ with separate controllers, separate accounting databases and independent job-ID 
 job number naming two unrelated jobs depending on which host you asked. Because `~/.claude` is
 often on shared/NFS storage, one log receives rows from both, tagged identically. That is the exact
 corruption this key exists to prevent, so the key must be
-**`<ClusterName>@<short hostname>` + jobid**.
+**`<ClusterName>@<short submit hostname>` + jobid**.
 
 **What the suffix is, and what it costs — state this, don't hide it.** The suffix is the **short
 hostname of the machine the command was typed on**, not the cluster's controller. Those are
@@ -275,8 +286,10 @@ user's own rows; neither failure announces itself.
 
 - **Config missing:** check first for a pre-plugin layout — probe with `test`, since one of the
   three is a directory: `test -f ~/.claude/slurm-sizing.md`, `test -f ~/.claude/slurm-jobs.tsv`,
-  `test -d ~/.claude/slurm-digests`. If any exist, offer to point the new config at them instead of
-  starting empty files beside real history. Then establish
+  `test -d ~/.claude/slurm-digests`. **Issue these as three bare commands and read the exit status
+  (`0` = present) — do not chain them with `&&`/`||` or an `echo`**, since a compound command is not
+  reliably covered by the `Bash(test *)` permission this skill declares. If any exist, offer to
+  point the new config at them instead of starting empty files beside real history. Then establish
   `digest_cluster` — **do not ask for it in free text.** Run the §1 chain, compose the identity,
   show the user the exact composed string **and the values it was built from**, and offer it as the
   answer, along with the option to name a different cluster
