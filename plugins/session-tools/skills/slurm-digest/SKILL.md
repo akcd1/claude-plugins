@@ -244,9 +244,16 @@ throughout is whether continuing requires *assuming* something unverified.
      against `digest_cluster`, conclude the digest is from another cluster, and skip enrichment for
      the whole merge while reporting it as a deliberate skip.
 
+     **Strip any domain suffix from whichever source supplied the value — take the first
+     dot-separated field**, so `SLURM_SUBMIT_HOST=login-1.example.edu` and `hostname -s` = `login-1`
+     both yield `login-1`. Some sites record an FQDN in the variable and a short name from
+     `hostname`; normalising only one of them makes the login-node and in-allocation identities
+     differ by a domain suffix, which skips enrichment inside every allocation.
+
      Take the value after the `=` (step 1) or the single field (step 2), trimmed, and compose
      `<ClusterName>@<short submit hostname>`. **If neither step 1 nor step 2 yields a
-     `ClusterName`**, use the bare short submit hostname as the whole identity and **say so in the
+     `ClusterName`**, use the bare short submit hostname as the whole identity — domain suffix
+     stripped the same way — and **say so in the
      report (Step 12)** — the identity is less specific than usual, and the user must be told rather
      than left to assume the normal composed form. **The host is the suffix, never the whole
      identity outside that fallback**: substituting one would fail this comparison on essentially

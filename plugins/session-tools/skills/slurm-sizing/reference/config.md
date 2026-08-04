@@ -140,7 +140,14 @@ another:
    so the skill would stand down for that entire session and look broken. This is not a corner case:
    interactive `srun --pty` sessions are ordinary working practice.
 
-   If `hostname -s` is unsupported, take the first dot-separated field of `hostname`. If neither
+   **Strip any domain suffix from whichever source supplied the value — take the first
+   dot-separated field.** `SLURM_SUBMIT_HOST=login-1.example.edu` and `hostname -s` = `login-1` must
+   both yield `login-1`. Some sites record an FQDN in `SLURM_SUBMIT_HOST` while `hostname -s`
+   returns the short name; without this, the login-node identity and the in-allocation identity
+   would differ by a domain suffix and the gate would stand down inside every allocation — the exact
+   failure `SLURM_SUBMIT_HOST` was introduced to remove. Normalise both sources the same way, always.
+
+   If `hostname -s` is unsupported, apply the same rule to plain `hostname`. If neither
    `SLURM_SUBMIT_HOST` nor a hostname can be read at all, the local identity is **unknown**: say so
    and stop. Do **not** fall back to the bare `ClusterName` and treat it as the identity — that is
    precisely the unsafe key this composition exists to replace. "Unknown" is never treated as a

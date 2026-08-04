@@ -65,9 +65,16 @@ data paths inside it are configurable).
    session, equal no configured `digest_cluster`, and stand the skill down until the session ended —
    which looks broken rather than degraded. Interactive `srun --pty` sessions are ordinary working
    practice, not a corner case.
+
+   **Strip any domain suffix from whichever source supplied the value — take the first
+   dot-separated field**, so `SLURM_SUBMIT_HOST=login-1.example.edu` and `hostname -s` = `login-1`
+   both yield `login-1`. Some sites record an FQDN in the variable and a short name from `hostname`;
+   normalising only one of them would make the login-node and in-allocation identities differ by a
+   domain suffix, reintroducing the same stand-down inside every allocation.
    - **Neither `scontrol` nor `sacctmgr` yields a `ClusterName`:** use the **bare short submit
      hostname as the whole identity** — resolved the same way, `SLURM_SUBMIT_HOST` before
-     `hostname -s` — and **say so explicitly in this run's report**: name the fallback and say the
+     `hostname -s`, domain suffix stripped — and **say so explicitly in this run's report**: name
+     the fallback and say the
      identity is less specific than usual. The point of reporting it is that the user is otherwise
      silently working under a different key than they expect. Do not stop for this: a reported,
      degraded identity beats going inert.
