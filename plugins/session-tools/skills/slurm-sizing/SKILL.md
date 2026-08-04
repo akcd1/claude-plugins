@@ -63,15 +63,44 @@ nine columns (`job_name`, `peak_MB`, `peak_G`, `n`, `scope`, `last_seen`, `rec_m
 [reference/config.md](reference/config.md) → "Table file format".
 
 - **Table file does not exist:** go to **Bootstrap** (§6).
-- **Job name is present in the table:** use that row's `rec_mem` / `rec_cpu` and state which row
-  you used (e.g. "using the `align_star` row: rec_mem=32G, rec_cpu=8"). Quote `n` too — `n = 1` is
-  a single observation, not a characterisation.
-  - **The value carries a `>=` prefix:** that's a lower bound from a run whose scope was never
-    recorded, so the true peak could be higher. It may justify *raising* the request above the
-    table value; it must never justify *lowering* the request below it.
+- **Job name is present in the table:** state which row you used, its `rec_mem` / `rec_cpu`, its
+  `n` (`n = 1` is a single observation, not a characterisation) — **and its `scope`**. Then apply
+  the scope check below **before** treating any number as usable.
 - **Job name is absent from the table:** say so explicitly, then either ask what scope to expect
   or start small and measure. Never fall back to a remembered/habitual number ("jobs like this
   usually need 64G") — an absent row is a reason to measure, not a reason to guess.
+
+### The scope check — do this every time, before quoting a number as usable
+
+**A recorded scope makes a row *checkable*. It does not make it *actionable*.** Those are
+different claims, and conflating them is how this system produces a confidently wrong answer.
+`scope` records what the measurement covered; whether the number is safe for *this* run depends on
+what you are about to submit, which only you know — the merge step could not have known it.
+
+State the row's `scope` prominently, then compare it to the run about to be submitted:
+
+- **No declared scope (`rec_mem` carries `>=`, or `scope` is empty / `unknown` / a `derived:` value
+  a human has not confirmed):** a lower bound from a run whose workload was never recorded, so the
+  true peak could be higher. It may justify *raising* the request above the table value; it must
+  never justify *lowering* the request below it.
+- **Declared scope, and the intended run is the SAME scope:** the number is usable as-is. Say which
+  scope you matched (e.g. "the row was measured at `1565 tiles (FULL)`, which is what you're about
+  to run").
+- **Declared scope, but the intended run is LARGER:** **do not use this number to size down.**
+  Treat it exactly as a lower bound — `>=` in effect — and say why: the measurement covered less
+  work than the run being sized, so it is evidence about a smaller job, not about this one. Either
+  scale by the known ratio if the relationship is genuinely linear and you say so, or keep the
+  larger request and treat this run as a fresh measurement. A row reading `36G` measured at
+  "5 of 100 units" is **not** a 36G recommendation for all 100.
+- **Declared scope, but the intended run is SMALLER:** a smaller run is not evidence for a bigger
+  one, and this row *is* the bigger one — the number is safe but likely generous. You may use it;
+  note that it was measured at a larger scope, and that measuring the smaller run would tighten it.
+- **Cannot determine the intended run's scope, or cannot tell how it compares:** **ask.** Do not
+  assume they match. "Same scope" is a claim about the workload, not a default.
+
+This check is the reason `scope` exists in the table at all. Skipping it turns a subset measurement
+into a full-run recommendation, which is the specific under-provisioning failure the column was
+added to prevent.
 
 ## 3. Never size from raw `sacct` MaxRSS on an I/O-heavy job
 

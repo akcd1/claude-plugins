@@ -237,6 +237,11 @@ Measured memory and CPU usage per job name, merged from weekly usage digests by
 |---|---|---|---|---|---|---|---|---|
 ```
 
+**Row order is part of the format: data rows are sorted by `job_name` ascending.** Every write
+re-sorts. An unspecified order lets two merges of the same data produce different files, making
+diffs noisy and hiding real changes during review; ascending `job_name` is stable as rows are
+added.
+
 **How to read a row**
 
 - **`job_name`** — the Slurm `JobName` exactly as it appears in the digest. This is the lookup key;
@@ -257,9 +262,22 @@ Measured memory and CPU usage per job name, merged from weekly usage digests by
   "12 tasks x 1565 tiles (FULL)"). Empty or `unknown` means the peak is only a **lower bound** —
   nothing is known about what it was processing. A `derived: <submit line>` value is evidence
   recovered from `sacct`, not a human-declared scope, and still counts as unknown until confirmed.
+
+  **The scope that governs a row is the scope of the run that set `peak_MB`** — not any sibling
+  run's. A job name usually has several runs in a digest and only one set the peak; the
+  recommendation is derived from the peak, so the peak's provenance is what governs it. If the
+  peak-setting run has no declared scope the row stays `>=`, whatever other runs of the same name
+  declared, and a displaced scope is preserved in `notes` rather than discarded.
+
+  **A recorded scope makes the row *checkable*, not automatically *actionable*.** It says what the
+  measurement covered; it does not say the number is safe for the next run. Whoever uses the number
+  must compare this scope against the run they are about to submit — see `slurm-sizing` §2, "The
+  scope check". A `36G` row measured at "5 of 100 units" is not a `36G` recommendation for 100.
 - **`last_seen`** — the week-ending date of the most recent digest that contained this job.
 - **`rec_mem`** — the recommended `--mem`, computed **from `peak_MB`**. A `>=` prefix means the
-  scope was unknown: the value may justify *raising* a request, never *lowering* one.
+  peak-setting run had no declared scope: the value may justify *raising* a request, never
+  *lowering* one. **No prefix does not mean "use it unconditionally"** — it means the scope is
+  known and must be checked against the intended run.
 - **`rec_cpu`** — the recommended `--cpus-per-task`, capped at the job's own `ReqCPU`.
 - **`notes`** — free text, **additive**: appending a note must preserve what is already there.
   `IO-BOUND` in this column is a load-bearing flag, not a comment — see below.

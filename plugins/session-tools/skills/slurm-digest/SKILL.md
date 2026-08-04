@@ -288,16 +288,31 @@ for what each one means and the exact header to write if the table has to be cre
    or any other `policy` value, in config is choosing more OOM risk in exchange for queue priority,
    and should make that choice deliberately, in config, not by editing this file.
 
-   Then apply the asymmetric scope rule, comparing this week's `scope` (Step 5/6) against the one
-   recorded in the row's `scope` column:
-   - scope matches the recorded scope -> plain recommendation, no prefix
-   - scope is larger than recorded -> do NOT lower; scale by the known ratio or keep the prior
-     request and treat this run as a fresh measurement
-   - scope is smaller than recorded -> a smaller scope is not evidence about the larger one; do
-     NOT lower anything, treat it like unknown scope for recommendation purposes, and note the
-     scope it was actually measured at
-   - scope unknown (empty, or a `derived:` value not yet confirmed by a human) -> prefix `>=`; the
-     row may justify raising a request, never lowering one
+   **Then set `scope` and the `>=` prefix from the provenance of the peak — and understand what
+   this step can and cannot decide.** The merge records *what the measurement covered*. It cannot
+   decide whether the number is safe to size a future run from, because at merge time nobody knows
+   what the user will run next. That comparison happens at the point of use, in `slurm-sizing` §2.
+   So do not read an absent `>=` as "actionable" — it means "checkable".
+
+   **The scope that governs a row is the scope of the run that set `peak_MB`.** A job name usually
+   has several rows in one digest with different jobids, and only one of them set the peak. The
+   recommendation is derived from the peak, so the peak's provenance is what governs it:
+   - **The peak-setting run has a declared scope** (matched in Step 5, or a `derived:` value a
+     human confirmed in Step 10) -> write that scope, no `>=` prefix.
+   - **The peak-setting run has no declared scope** -> `scope: unknown` (or the unconfirmed
+     `derived:` value) and prefix `>=`, **regardless of what sibling rows declared**. A scope
+     belonging to a run that did not set the peak says nothing about the peak.
+   - **`peak_MB` did not change this week** -> the governing scope did not change either. Leave
+     both alone.
+   - **First-ever row for this job name** -> there is no prior scope to compare against; take the
+     scope of the run that set its peak, or `unknown` with `>=` if that run has none. A new row is
+     not a special case, it is this same rule with no history.
+   - **A declared scope displaced by this rule is preserved, not discarded.** If a sibling run
+     declared a scope but did not set the peak, record it in `notes` (additively, per Step 9) —
+     e.g. `other-run scope: 5 of 100 units (jobid 7932158)`. It is real information about the job,
+     it is just not the provenance of this number.
+
+   A `>=` row may justify raising a request, never lowering one.
 
 9. **CPU.** **First pick the row, then apply the formula.** A job name usually has **several rows
    in one digest** (nine runs of the same name is ordinary), and their `CPUPct` values differ
@@ -360,6 +375,15 @@ for what each one means and the exact header to write if the table has to be cre
     the user is asked about, which is the only mechanism that turns `>=` rows into real
     recommendations, so a mis-ordered list has a real cost. Names left unanswered stay `unknown`
     and carry forward.
+
+    **If no human is available to answer, that is a normal outcome, not a failure.** When this runs
+    unattended, or the user declines to answer, or the session ends before they do: leave every
+    unanswered name at `scope: unknown` with its `>=` prefix, **complete the merge anyway**, and
+    say in the report how many names went unanswered. Do **not** block the merge waiting for a
+    reply, and above all do **not** invent, infer or guess a scope to fill the gap — a fabricated
+    scope removes a `>=` and turns a lower bound into a confident wrong answer, which is strictly
+    worse than the `unknown` it replaced. The peaks still merged; only the scope is missing, and it
+    can be supplied on any later run.
     **Show derived evidence alongside the prompt.** For any unmatched name Step 6 enriched with a
     `derived:` scope, display that derived submit line next to it so the human can confirm or
     correct it. **Both confirmation and correction promote it identically:** whether the human
@@ -371,7 +395,10 @@ for what each one means and the exact header to write if the table has to be cre
 
 11. **Persist, then archive.** This is the point the on-disk table changes: write the fully
     merged and recomputed table (Steps 7-10 applied) back to the configured `table` path now,
-    preserving the nine-column header. Only after that write succeeds, write the raw pasted digest
+    preserving the nine-column header and **sorting all data rows by `job_name` ascending**. The
+    sort is not cosmetic: an unspecified order lets two merges of the same data produce different
+    files, which makes every diff noisy and hides real changes during review. Ascending `job_name`
+    is stable as rows are added. Only after that write succeeds, write the raw pasted digest
     to `<archive>/YYYY-MM-DD.tsv` under the week-ending date from Step 1 (creating the configured
     `archive` directory with `mkdir -p` if it does not exist) — the duplicate check already
     happened in Step 1, so this write should never collide with an existing file under normal
@@ -390,9 +417,20 @@ for what each one means and the exact header to write if the table has to be cre
 
     Report it split, never as one number:
     - **Actionable subtotal** — summed over rows whose `rec_mem` has **no** `>=` prefix. This is
-      reservation that can actually be given back now.
+      reservation that could be given back, subject to the scope check `slurm-sizing` §2 applies
+      when the number is actually used.
     - **Pending-scope subtotal** — summed over rows whose `rec_mem` **does** carry `>=`. This is
       not actionable; it is what capturing scope would unlock.
+
+    **A negative delta is meaningful, not an error — report it as what it is.** A row contributes
+    negatively when `rec_mem_GB > ReqMem_GB`, i.e. the job's own observed peak (plus headroom) is
+    larger than what it asked for: applying the recommendation would **increase** that row's
+    reservation. That is a real signal of **under-provisioning relative to its own measured peak**,
+    and often means the job has been running close to or into its limit. Never present a negative
+    subtotal as a saving, never take its absolute value, and never silently clamp it to zero. If a
+    subtotal is negative overall, say so in those terms — "applying these would add N GB, because
+    these jobs are asking for less than they have been measured using" — and name the rows driving
+    it, since each one is worth a look on its own.
 
     Merging the two into a single figure would contradict this step's own statement that `>=` rows
     are not actionable for sizing down, and the split is the more useful number anyway. Say the
