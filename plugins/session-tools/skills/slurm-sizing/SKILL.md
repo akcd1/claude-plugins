@@ -49,7 +49,8 @@ data paths inside it are configurable).
    ```bash
    scontrol show config | grep -E '^ClusterName'      # 1. the cluster name
    sacctmgr -n -P list cluster format=Cluster         # 2. only if step 1 gave nothing
-   echo "${SLURM_SUBMIT_HOST:-$(hostname -s)}"        # the suffix: where the command was typed
+   echo "$SLURM_SUBMIT_HOST"                          # 3a. the suffix, when Slurm set it
+   hostname -s                                        # 3b. only if 3a printed nothing
    ```
 
    Take the value after the `=` (step 1) or the single field (step 2), trimmed, and compose
@@ -294,8 +295,9 @@ user's own rows; neither failure announces itself.
 - **Config missing:** check first for a pre-plugin layout — probe with `test`, since one of the
   three is a directory: `test -f ~/.claude/slurm-sizing.md`, `test -f ~/.claude/slurm-jobs.tsv`,
   `test -d ~/.claude/slurm-digests`. **Issue these as three bare commands and read the exit status
-  (`0` = present) — do not chain them with `&&`/`||` or an `echo`**, since a compound command is not
-  reliably covered by the `Bash(test *)` permission this skill declares. If any exist, offer to
+  (`0` = present) — do not chain them with `&&`/`||`**: a chain collapses three independent answers
+  into a single exit status, so a non-zero result never tells you *which* path is missing, and `&&`
+  short-circuits so the later probes never run at all. If any exist, offer to
   point the new config at them instead of starting empty files beside real history. Then establish
   `digest_cluster` — **do not ask for it in free text.** Run the §1 chain, compose the identity,
   show the user the exact composed string **and the values it was built from**, and offer it as the

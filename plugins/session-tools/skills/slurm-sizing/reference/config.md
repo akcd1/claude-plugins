@@ -125,7 +125,8 @@ another:
    stripped:
 
    ```bash
-   echo "${SLURM_SUBMIT_HOST:-$(hostname -s)}"
+   echo "$SLURM_SUBMIT_HOST"     # prefer this
+   hostname -s                   # only if the above printed nothing
    ```
 
    **Prefer `SLURM_SUBMIT_HOST`; fall back to `hostname -s`. Do not "simplify" this back to a bare
@@ -301,9 +302,16 @@ the user's own rows. Neither failure announces itself.
    ```
 
    **Three bare commands, one per path — read the exit status (`0` = present).** Do not join them
-   with `&&`/`||` or wrap them in an `echo`: a compound command is not reliably covered by the
-   `Bash(test *)` permission these skills declare, and a probe that needs an extra permission to run
-   is a probe that silently doesn't run.
+   with `&&`/`||`: a chain collapses three independent answers into a single exit status, so a
+   non-zero result never tells you *which* of the three paths is missing — and `&&` short-circuits,
+   so the later probes never run at all. Issue them separately and read each result.
+
+   **On compound commands generally — the rule is about command substitution, not pipes.** A simple
+   pipe whose both halves are declared is fine: `scontrol show config | grep -E '^ClusterName'` is
+   covered by `Bash(scontrol *)` together with `Bash(grep *)`. What these skills must avoid is
+   **command substitution** — `$(...)` cannot be checked before it runs, so a probe written that way
+   may be refused outright. That is why the submit-host probe above is two bare commands rather than
+   the more compact `echo "${SLURM_SUBMIT_HOST:-$(hostname -s)}"`.
 
    If any exist, offer to point the config at them instead of creating empty files beside them.
    Silently starting fresh next to a populated table would strand real history.

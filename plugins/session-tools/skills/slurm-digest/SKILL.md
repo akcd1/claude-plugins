@@ -35,8 +35,10 @@ in this skill, on first use — it probes for a pre-plugin layout with `test -f 
 `test -f ~/.claude/slurm-jobs.tsv`, `test -d ~/.claude/slurm-digests` (the third is a directory,
 which `Read` cannot distinguish from a missing path), confirms `digest_cluster` and `digest_user`
 with the user, and creates the archive directory with `mkdir -p`. **Issue those three probes as
-bare commands and read the exit status (`0` = present) — do not chain them with `&&`/`||` or an
-`echo`**, since a compound command is not reliably covered by the `Bash(test *)` permission this
+bare commands and read the exit status (`0` = present) — do not chain them with `&&`/`||`**: a
+chain collapses three answers into one exit status and short-circuits, so a failure never says which
+path is missing. (A pipe of two separately-declared commands is fine; it is `$(...)` command
+substitution that cannot be checked before it runs.) This is the `Bash(test *)` permission this
 skill declares.
 
 **If `enabled` is `false`**, the user has declined this system. Merge nothing. Report that it is
@@ -232,7 +234,8 @@ throughout is whether continuing requires *assuming* something unverified.
      ```bash
      scontrol show config | grep -E '^ClusterName'      # 1. preferred
      sacctmgr -n -P list cluster format=Cluster         # 2. only if step 1 gave nothing
-     echo "${SLURM_SUBMIT_HOST:-$(hostname -s)}"        # the suffix
+     echo "$SLURM_SUBMIT_HOST"                          # 3a. the suffix, when Slurm set it
+     hostname -s                                        # 3b. only if 3a printed nothing
      ```
 
      **`SLURM_SUBMIT_HOST` first, `hostname -s` only as its fallback — do not "simplify" this back
