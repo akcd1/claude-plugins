@@ -1,7 +1,7 @@
 {
   "name": "session-tools",
   "description": "Session productivity tools for Claude Code. Includes self-assess for auditing sessions for errors, inefficiencies, and repeated workarounds, plus slurm-sizing/slurm-digest for sizing Slurm jobs from measured usage instead of habit.",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "author": {
     "name": "Whitehead Institute"
   }
