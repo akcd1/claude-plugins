@@ -60,9 +60,14 @@ run, rather than choosing a value. Proceeding silently past one of these is how 
 enters the table; everything else here is built so the *conservative* outcome is the automatic one,
 and a hard stop marks the places where there is no conservative outcome to fall back to.
 
-The hard stops in this skill are: **a missing week-ending date, and an already-archived digest
-(Step 1)**; **the first multi-user digest encounter (Step 3)**; and **every question in Bootstrap**
-(`digest_cluster`, `digest_user`, decline — see the config contract).
+The hard stops in this skill are: **a week-ending date that can be neither supplied nor derived, an
+already-archived digest, and a digest whose rows overlap a previously merged one (Step 1)**; **the
+first multi-user digest encounter (Step 3)**; and **every question in Bootstrap** (`digest_cluster`,
+`digest_user`, decline — see the config contract).
+
+**A missing date is no longer a hard stop by itself** — Step 1 derives it from the digest's own job
+IDs via `sacct`, which is idempotent in the way that asking was protecting. The hard stop remains
+for the case where derivation cannot run at all.
 
 **Step 10's scope prompt is deliberately NOT a hard stop.** Its unanswered outcome is a documented
 conservative one — `scope: unknown` with a `>=` prefix — and the merge completes. The distinction
@@ -71,12 +76,43 @@ throughout is whether continuing requires *assuming* something unverified.
 ## Procedure
 
 1. **Establish the week-ending date, then refuse duplicates (precondition — check this FIRST,
-   before parsing or merging anything).** The digest's date is **a required argument**, supplied
-   alongside the pasted table (e.g. `/session-tools:slurm-digest 2026-08-01 <pasted digest>`). The
-   digest body itself contains no date column, so it cannot be recovered from the paste.
-   **If the date is missing: HARD STOP — ask for it, and never assume today's date.** Defaulting to
-   today lets the same digest pasted on two different days archive under two filenames, pass this
-   duplicate check both times, and double `n` — exactly the corruption this step exists to prevent.
+   before parsing or merging anything).** The date may be supplied as an argument
+   (`/session-tools:slurm-digest 2026-08-01 <pasted digest>`). **When it is not, DERIVE it from the
+   digest's own job IDs — do not ask.** The digest body has no date column, but its jobs are in
+   Slurm's accounting database and their dates are a fact about the paste:
+
+   ```bash
+   sacct -j <comma-separated jobids from the digest> --format=JobID,Submit,End \
+         --parsable2 --noheader
+   ```
+
+   Discard `.`-suffixed step rows, take the **latest `End` date** across the remainder, and use that
+   as the week-ending date. Report the full span (earliest `Submit` -> latest `End`) and say plainly
+   that the date was derived, so the user can correct it against their digest email.
+
+   **Why deriving is safe where defaulting to today is not** — the distinction is the whole point.
+   The failure this precondition prevents is the *same digest* archiving under *two filenames* on
+   two different days, passing the duplicate check both times and doubling `n`. Today's date is a
+   property of **when you pasted**, so it changes between pastes. A date derived from the job IDs is
+   a property of **what you pasted**, so the same digest yields the same date on any future day.
+   Derivation is idempotent in exactly the way the hard stop was protecting, which is why it
+   replaces the question rather than skipping it — and it is more reliable than a human retyping a
+   date out of an email.
+
+   **Fall back to asking — HARD STOP — only when derivation cannot run:** `sacct` unavailable or
+   erroring, **no** job ID resolving (retention gap, or a digest from another cluster — apply Step
+   6's cluster guard before trusting any of this), or every resolved row carrying an `Unknown` end.
+   Never assume today's date in that case; ask, exactly as before. If only *some* IDs resolve that
+   is enough — say how many did, since a partial resolution still pins the latest end it saw.
+
+   Two things the derived date is **not**. It is not necessarily the calendar week boundary the
+   digest email names — jobs rarely end exactly on it — so a user who has the email should be
+   invited to correct it. And it says nothing about whether this digest overlaps a previous one:
+   **check row overlap as well as the filename.** Compare the digest's job IDs against those in the
+   most recently archived `.tsv`. The filename check cannot see a digest re-sent under a different
+   date carrying overlapping rows, and re-merging those inflates `n` just as badly. Report the
+   overlap count; a non-zero one is a HARD STOP.
+
    With the date in hand, check whether `<archive>/YYYY-MM-DD.tsv` already exists for it (`Read`
    it; a "no such file" error is the not-archived case), where `<archive>` is the configured
    `archive` path (default `~/.claude/slurm-sizing/digests`).
@@ -282,9 +318,21 @@ throughout is whether continuing requires *assuming* something unverified.
      live: a combined `JobID,SubmitLine,WorkDir` query interleaves `WorkDir` into the wrong
      position whenever a wrapped command uses one or more pipes. No replacement delimiter is safe
      either, since any character you pick could itself appear in a submit line. Querying one field
-     at a time makes each row exactly `JobID|<value>` — a `JobID` can never contain `|`, so
+     at a time makes each *record* exactly `JobID|<value>` — a `JobID` can never contain `|`, so
      splitting on the **first** `|` only is exact regardless of what the field holds. Keep this as
      two calls; do not re-merge them into one query.
+   - **A record is not always a LINE — a submit line can contain newlines.** `srun ... python -c`
+     with a multi-line script embeds real newlines in `SubmitLine`, so one record spans several
+     output lines and a naive line-by-line parse silently truncates it (observed live: a
+     `--job-name=..._mn_verify` row split across four lines, of which only the first carried the
+     jobid). Parse continuation-aware: a **new record starts only where a line matches
+     `^<jobid>(_<task>)?(\.<step>)?\|`**; any other line is a continuation of the record above it
+     and must be appended to it. A line-oriented `grep`/`cut` pipeline cannot express this — do it
+     in a real parser.
+   - **Do not filter step rows with a bare `grep -v '\.'`.** Submit lines are full of dots (paths,
+     versions, filenames), so that pattern discards real records — it is the `JobID` field that must
+     be tested for a `.`, not the whole line. Same mistake as above in a different disguise: both
+     come from treating the output as text rather than as records.
    - **Discard step rows before treating a hit as real.** A base job (and every array task within
      it) returns extra rows for its steps — `<jobid>.batch`, `<jobid>.extern`, and any other
      `.`-suffixed step — with empty `SubmitLine`/`WorkDir`. Drop any returned row whose `JobID`
